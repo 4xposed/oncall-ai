@@ -1,0 +1,18 @@
+---
+source: tests/grafana.rs
+expression: alerts
+---
+- source: grafana
+  source_alert_id: c4f3a2b1d8e90f67
+  labels:
+    alertname: HighErrorRate
+    grafana_folder: Production
+    service: checkout
+    severity: critical
+  annotations:
+    description: The checkout service error rate has exceeded 2% for 5 minutes.
+    runbook_url: "https://runbooks.example.com/checkout-5xx"
+    summary: 5xx rate above 2% on checkout
+  starts_at: "2026-07-12T09:03:00Z"
+  status: firing
+  raw_payload: "[raw]"

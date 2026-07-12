@@ -1,0 +1,52 @@
+{
+  "receiver": "oncall-ai",
+  "status": "firing",
+  "orgId": 1,
+  "alerts": [
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "HighErrorRate",
+        "grafana_folder": "Production",
+        "service": "checkout",
+        "severity": "critical"
+      },
+      "annotations": {
+        "summary": "5xx rate above 2% on checkout",
+        "description": "The checkout service error rate has exceeded 2% for 5 minutes.",
+        "runbook_url": "https://runbooks.example.com/checkout-5xx"
+      },
+      "startsAt": "2026-07-12T09:03:00Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "https://grafana.example.com/alerting/grafana/adlqoyhoyfuveb/view",
+      "fingerprint": "c4f3a2b1d8e90f67",
+      "silenceURL": "https://grafana.example.com/alerting/silence/new?alertmanager=grafana&matcher=alertname%3DHighErrorRate",
+      "dashboardURL": "",
+      "panelURL": "",
+      "values": {
+        "B": 0.034
+      },
+      "valueString": "[ var='B' labels={service=checkout} value=0.034 ]"
+    }
+  ],
+  "groupLabels": {
+    "alertname": "HighErrorRate",
+    "grafana_folder": "Production"
+  },
+  "commonLabels": {
+    "alertname": "HighErrorRate",
+    "grafana_folder": "Production",
+    "service": "checkout",
+    "severity": "critical"
+  },
+  "commonAnnotations": {
+    "summary": "5xx rate above 2% on checkout"
+  },
+  "externalURL": "https://grafana.example.com/",
+  "version": "1",
+  "groupKey": "{}:{alertname=\"HighErrorRate\", grafana_folder=\"Production\"}",
+  "truncatedAlerts": 0,
+  "title": "[FIRING:1] HighErrorRate Production (checkout critical)",
+  "state": "alerting",
+  "message": "**Firing**\n\nValue: B=0.034\nLabels:\n - alertname = HighErrorRate\n - service = checkout"
+}

@@ -2,10 +2,13 @@
 # To override you must place a config.toml next to the binary or under $ONCALL_HOME.
 # Every key is optional, when a key is not set this defaults apply.
 
-# [server]    webhook server — arrives in M2
 # [models]    model endpoints — arrives in M5/M7
 # [storage]   data/ paths — arrives in M6/M13
 
 [log]
 format = "pretty"   # "pretty" or "json"
 level = "info"
+
+[webhook]
+bind = "127.0.0.1:8080"
+body_limit_bytes = 1048576

@@ -4,11 +4,15 @@ use std::path::{Path, PathBuf};
 use config::{Environment, File, FileFormat, Source};
 use serde::Deserialize;
 
+/// Load defaults.
 pub const DEFAULT_CONFIG: &str = include_str!("../seed/default_config.toml");
 
+/// Where the home directory came from.
 #[derive(Debug, PartialEq)]
 pub enum HomeSource {
+    /// The `ONCALL_HOME` environment variable.
     EnvVar,
+    /// The running executable's directory.
     ExeDir,
 }
 
@@ -21,6 +25,7 @@ impl fmt::Display for HomeSource {
     }
 }
 
+/// An error from resolving the home directory.
 #[derive(Debug, thiserror::Error)]
 pub enum HomeError {
     #[error("cannot determine executable path: {0}")]
@@ -29,6 +34,13 @@ pub enum HomeError {
     NoParent,
 }
 
+/// Resolves the agent's home directory.
+///
+/// `env_override` wins, otherwise the executable's directory is used.
+///
+/// # Errors
+///
+/// Fails when the executable path is unknown or has no parent.
 pub fn resolve_home(env_override: Option<PathBuf>) -> Result<(PathBuf, HomeSource), HomeError> {
     if let Some(home) = env_override {
         return Ok((home, HomeSource::EnvVar));
@@ -38,17 +50,30 @@ pub fn resolve_home(env_override: Option<PathBuf>) -> Result<(PathBuf, HomeSourc
     Ok((dir.to_path_buf(), HomeSource::ExeDir))
 }
 
+/// The full agent configuration.
 #[derive(Debug, PartialEq, Deserialize)]
 pub struct Config {
     pub log: LogConfig,
+    pub webhook: WebhookConfig,
 }
 
+/// Webhook server settings.
+#[derive(Debug, PartialEq, Deserialize)]
+pub struct WebhookConfig {
+    pub bind: std::net::SocketAddr,
+    /// Largest accepted request body in bytes.
+    pub body_limit_bytes: usize,
+}
+
+/// Log output settings.
 #[derive(Debug, PartialEq, Deserialize)]
 pub struct LogConfig {
     pub format: LogFormat,
+    /// A tracing filter directive such as `info`.
     pub level: String,
 }
 
+/// The log line format.
 #[derive(Debug, PartialEq, Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LogFormat {
@@ -56,9 +81,12 @@ pub enum LogFormat {
     Json,
 }
 
+/// Where the loaded configuration came from.
 #[derive(Debug, PartialEq)]
 pub enum ConfigSource {
+    /// No `config.toml` found, embedded defaults used.
     Embedded,
+    /// A `config.toml` at this path.
     File(PathBuf),
 }
 
@@ -71,17 +99,29 @@ impl fmt::Display for ConfigSource {
     }
 }
 
+/// An error from loading configuration.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
+    /// The `config.toml` failed to parse or merge.
     #[error("malformed config {path}: {source}")]
     File {
         path: PathBuf,
         source: Box<config::ConfigError>,
     },
+    /// The merged configuration is not a valid [`Config`].
     #[error("invalid config: {0}")]
     Invalid(Box<config::ConfigError>),
 }
 
+/// Loads configuration for the given home directory.
+///
+/// Layers embedded defaults, then `config.toml` under `home` if present,
+/// then `ONCALL_*` environment variables. Later layers win.
+///
+/// # Errors
+///
+/// Fails when a present `config.toml` is malformed or the merged result is
+/// not a valid [`Config`].
 pub fn load(home: &Path) -> Result<(Config, ConfigSource), ConfigError> {
     load_with_env(
         home,
@@ -161,6 +201,24 @@ mod tests {
             .expect("embedded default_config.toml must parse into Config");
         assert_eq!(config.log.format, LogFormat::Pretty);
         assert_eq!(config.log.level, "info");
+        assert_eq!(
+            config.webhook.bind,
+            "127.0.0.1:8080"
+                .parse::<std::net::SocketAddr>()
+                .expect("valid addr")
+        );
+        assert_eq!(config.webhook.body_limit_bytes, 1_048_576);
+    }
+
+    #[test]
+    fn invalid_bind_addr_fails_loud_with_path() {
+        let home = home_with(Some("[webhook]\nbind = \"not-an-address\""));
+        let err = load_with_env(home.path(), no_env()).expect_err("must fail");
+        assert!(matches!(err, ConfigError::File { .. }));
+        assert!(
+            err.to_string().contains("config.toml"),
+            "error must name the file: {err}"
+        );
     }
 
     #[test]

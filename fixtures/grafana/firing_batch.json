@@ -1,0 +1,70 @@
+{
+  "receiver": "oncall-ai",
+  "status": "firing",
+  "orgId": 1,
+  "alerts": [
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "HighErrorRate",
+        "grafana_folder": "Production",
+        "service": "checkout",
+        "severity": "critical"
+      },
+      "annotations": {
+        "summary": "5xx rate above 2% on checkout"
+      },
+      "startsAt": "2026-07-12T09:03:00Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "https://grafana.example.com/alerting/grafana/adlqoyhoyfuveb/view",
+      "fingerprint": "c4f3a2b1d8e90f67",
+      "silenceURL": "https://grafana.example.com/alerting/silence/new?alertmanager=grafana&matcher=alertname%3DHighErrorRate",
+      "dashboardURL": "",
+      "panelURL": "",
+      "values": {
+        "B": 0.034
+      },
+      "valueString": "[ var='B' labels={service=checkout} value=0.034 ]"
+    },
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "HighErrorRate",
+        "grafana_folder": "Production",
+        "service": "payments",
+        "severity": "critical"
+      },
+      "annotations": {
+        "summary": "5xx rate above 2% on payments"
+      },
+      "startsAt": "2026-07-12T09:04:30Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "https://grafana.example.com/alerting/grafana/adlqoyhoyfuveb/view",
+      "fingerprint": "9e2a4c6b8d0f1e35",
+      "silenceURL": "https://grafana.example.com/alerting/silence/new?alertmanager=grafana&matcher=alertname%3DHighErrorRate",
+      "dashboardURL": "",
+      "panelURL": "",
+      "values": {
+        "B": 0.051
+      },
+      "valueString": "[ var='B' labels={service=payments} value=0.051 ]"
+    }
+  ],
+  "groupLabels": {
+    "alertname": "HighErrorRate",
+    "grafana_folder": "Production"
+  },
+  "commonLabels": {
+    "alertname": "HighErrorRate",
+    "grafana_folder": "Production",
+    "severity": "critical"
+  },
+  "commonAnnotations": {},
+  "externalURL": "https://grafana.example.com/",
+  "version": "1",
+  "groupKey": "{}:{alertname=\"HighErrorRate\", grafana_folder=\"Production\"}",
+  "truncatedAlerts": 0,
+  "title": "[FIRING:2] HighErrorRate Production",
+  "state": "alerting",
+  "message": "**Firing**\n\n2 alerts are firing"
+}

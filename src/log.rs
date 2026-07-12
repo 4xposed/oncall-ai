@@ -9,6 +9,15 @@ pub struct LoggingError {
     source: tracing_subscriber::filter::ParseError,
 }
 
+/// Sets up the global tracing subscriber.
+///
+/// # Errors
+///
+/// Fails when `cfg.level` is not a valid tracing filter.
+///
+/// # Panics
+///
+/// Panics if a subscriber is already setup.
 pub fn init(cfg: &LogConfig) -> Result<(), LoggingError> {
     let filter = EnvFilter::try_new(&cfg.level).map_err(|source| LoggingError {
         level: cfg.level.clone(),

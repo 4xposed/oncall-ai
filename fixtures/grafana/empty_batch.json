@@ -1,0 +1,16 @@
+{
+  "receiver": "oncall-ai",
+  "status": "resolved",
+  "orgId": 1,
+  "alerts": [],
+  "groupLabels": {},
+  "commonLabels": {},
+  "commonAnnotations": {},
+  "externalURL": "https://grafana.example.com/",
+  "version": "1",
+  "groupKey": "{}:{alertname=\"HighErrorRate\"}",
+  "truncatedAlerts": 0,
+  "title": "[RESOLVED] HighErrorRate",
+  "state": "ok",
+  "message": ""
+}
