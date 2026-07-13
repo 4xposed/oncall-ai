@@ -11,4 +11,5 @@ level = "info"
 
 [webhook]
 bind = "127.0.0.1:8080"
-body_limit_bytes = 1048576
+body_limit_bytes = 1048576      # larger bodies are rejected with 413
+body_log_limit_bytes = 65536    # longest body echo in the intake log line

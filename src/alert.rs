@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use std::collections::BTreeMap;
 
 /// A normalized alert from an [`AlertSource`].
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Alert {
     pub source: &'static str,
     /// The source's own identifier for the alert.
@@ -20,6 +20,7 @@ pub struct Alert {
 #[serde(rename_all = "lowercase")]
 pub enum AlertStatus {
     Firing,
+    Acknowledged,
     Resolved,
 }
 
@@ -27,6 +28,7 @@ impl std::fmt::Display for AlertStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             AlertStatus::Firing => "firing",
+            AlertStatus::Acknowledged => "acknowledged",
             AlertStatus::Resolved => "resolved",
         })
     }
@@ -34,18 +36,8 @@ impl std::fmt::Display for AlertStatus {
 
 /// An error from parsing a webhook body.
 #[derive(Debug, thiserror::Error)]
-#[error("{message}")]
-pub struct ParseError {
-    message: String,
-}
-
-impl From<serde_json::Error> for ParseError {
-    fn from(err: serde_json::Error) -> Self {
-        Self {
-            message: err.to_string(),
-        }
-    }
-}
+#[error(transparent)]
+pub struct ParseError(#[from] serde_json::Error);
 
 /// A parser for one alert source's webhook payloads.
 pub trait AlertSource: Send + Sync {
@@ -58,4 +50,28 @@ pub trait AlertSource: Send + Sync {
     ///
     /// Fails on payloads this source does not understand.
     fn parse(&self, body: &[u8]) -> Result<Vec<Alert>, ParseError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AlertStatus;
+
+    #[test]
+    fn status_display_and_serde_are_stable() {
+        let statuses = [
+            AlertStatus::Firing,
+            AlertStatus::Acknowledged,
+            AlertStatus::Resolved,
+        ];
+        let rendered: Vec<(String, String)> = statuses
+            .iter()
+            .map(|status| {
+                (
+                    status.to_string(),
+                    serde_json::to_string(status).expect("status serializes"),
+                )
+            })
+            .collect();
+        insta::assert_yaml_snapshot!(rendered);
+    }
 }

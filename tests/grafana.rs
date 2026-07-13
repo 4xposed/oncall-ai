@@ -26,6 +26,20 @@ fn resolved_normalizes_with_resolved_status() {
 }
 
 #[test]
+fn raw_payload_is_the_alert_slice() {
+    let body = include_bytes!("../fixtures/grafana/firing_batch.json");
+    let alerts = parse_fixture(body);
+    let full: serde_json::Value = serde_json::from_slice(body).expect("fixture is JSON");
+    let raw_alerts = full
+        .get("alerts")
+        .and_then(serde_json::Value::as_array)
+        .expect("alerts array");
+    let parsed: Vec<_> = alerts.iter().map(|alert| &alert.raw_payload).collect();
+    let expected: Vec<_> = raw_alerts.iter().collect();
+    assert_eq!(parsed, expected);
+}
+
+#[test]
 fn empty_batch_parses_to_no_alerts() {
     let alerts = parse_fixture(include_bytes!("../fixtures/grafana/empty_batch.json"));
     assert_eq!(alerts, vec![]);

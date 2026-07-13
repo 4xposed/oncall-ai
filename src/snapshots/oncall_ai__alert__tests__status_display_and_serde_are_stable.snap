@@ -1,0 +1,10 @@
+---
+source: src/alert.rs
+expression: rendered
+---
+- - firing
+  - "\"firing\""
+- - acknowledged
+  - "\"acknowledged\""
+- - resolved
+  - "\"resolved\""

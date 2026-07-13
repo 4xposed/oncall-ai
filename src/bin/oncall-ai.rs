@@ -80,6 +80,8 @@ impl Shutdown {
 
     #[cfg(not(unix))]
     async fn wait(self) {
-        let _ = tokio::signal::ctrl_c().await;
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            tracing::error!(%error, "ctrl-C listener failed, shutting down");
+        }
     }
 }

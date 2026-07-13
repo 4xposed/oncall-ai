@@ -1,0 +1,15 @@
+---
+source: tests/pagerduty.rs
+expression: alerts
+---
+- source: pagerduty
+  source_alert_id: PGR0VU2
+  labels:
+    priority: P1
+    service: checkout
+    urgency: high
+  annotations:
+    summary: 5xx rate above 2% on checkout
+  starts_at: "2026-07-12T14:03:02Z"
+  status: resolved
+  raw_payload: "[raw]"

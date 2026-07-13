@@ -8,7 +8,7 @@ use serde::Deserialize;
 pub const DEFAULT_CONFIG: &str = include_str!("../seed/default_config.toml");
 
 /// Where the home directory came from.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum HomeSource {
     /// The `ONCALL_HOME` environment variable.
     EnvVar,
@@ -51,22 +51,24 @@ pub fn resolve_home(env_override: Option<PathBuf>) -> Result<(PathBuf, HomeSourc
 }
 
 /// The full agent configuration.
-#[derive(Debug, PartialEq, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Deserialize)]
 pub struct Config {
     pub log: LogConfig,
     pub webhook: WebhookConfig,
 }
 
 /// Webhook server settings.
-#[derive(Debug, PartialEq, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Deserialize)]
 pub struct WebhookConfig {
     pub bind: std::net::SocketAddr,
     /// Largest accepted request body in bytes.
     pub body_limit_bytes: usize,
+    /// Longest slice of a body echoed into the intake log line, in bytes.
+    pub body_log_limit_bytes: usize,
 }
 
 /// Log output settings.
-#[derive(Debug, PartialEq, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Deserialize)]
 pub struct LogConfig {
     pub format: LogFormat,
     /// A tracing filter directive such as `info`.
@@ -74,7 +76,7 @@ pub struct LogConfig {
 }
 
 /// The log line format.
-#[derive(Debug, PartialEq, Clone, Copy, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LogFormat {
     Pretty,
@@ -82,7 +84,7 @@ pub enum LogFormat {
 }
 
 /// Where the loaded configuration came from.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum ConfigSource {
     /// No `config.toml` found, embedded defaults used.
     Embedded,
@@ -141,7 +143,7 @@ fn load_with_env(
 
     let source = if path.is_file() {
         builder = builder.add_source(File::from(path.clone()).format(FileFormat::Toml));
-        ConfigSource::File(path.clone())
+        ConfigSource::File(path)
     } else {
         ConfigSource::Embedded
     };
@@ -208,6 +210,7 @@ mod tests {
                 .expect("valid addr")
         );
         assert_eq!(config.webhook.body_limit_bytes, 1_048_576);
+        assert_eq!(config.webhook.body_log_limit_bytes, 65_536);
     }
 
     #[test]

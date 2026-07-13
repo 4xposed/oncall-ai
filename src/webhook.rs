@@ -1,6 +1,7 @@
 use crate::alert::AlertSource;
 use crate::config::WebhookConfig;
 use crate::grafana::Grafana;
+use crate::pagerduty::Pagerduty;
 
 use axum::Router;
 use axum::body::Bytes;
@@ -12,16 +13,24 @@ use axum::routing::{get, post};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Alert sources, source name as key.
 type Registry = Arc<HashMap<&'static str, Box<dyn AlertSource>>>;
+
+#[derive(Clone)]
+struct AppState {
+    registry: Registry,
+    body_log_limit_bytes: usize,
+}
 
 /// Builds the registry. New adapters are one line here.
 fn registry() -> Registry {
     Arc::new(
-        [Box::new(Grafana) as Box<dyn AlertSource>]
-            .into_iter()
-            .map(|adapter| (adapter.name(), adapter))
-            .collect(),
+        [
+            Box::new(Grafana) as Box<dyn AlertSource>,
+            Box::new(Pagerduty),
+        ]
+        .into_iter()
+        .map(|adapter| (adapter.name(), adapter))
+        .collect(),
     )
 }
 
@@ -45,15 +54,32 @@ pub fn router(config: &WebhookConfig) -> Router {
         .route("/webhook/{source}", post(webhook))
         .route("/health", get(health))
         .layer(DefaultBodyLimit::max(config.body_limit_bytes))
-        .with_state(registry())
+        .with_state(AppState {
+            registry: registry(),
+            body_log_limit_bytes: config.body_log_limit_bytes,
+        })
+}
+
+/// Returns the longest prefix of at most `max` bytes that ends on a
+/// character boundary.
+fn truncate_at_char_boundary(text: &str, max: usize) -> &str {
+    if text.len() <= max {
+        return text;
+    }
+    let end = (0..=max)
+        .rev()
+        .find(|&index| text.is_char_boundary(index))
+        .unwrap_or(0);
+    text.get(..end).unwrap_or_default()
 }
 
 /// Logs the raw body, then parses it with the matching adapter.
 ///
 /// The raw line is the audit trail for unparseable payloads and the capture
-/// source for new fixtures.
+/// source for new fixtures; bodies over `body_log_limit_bytes` are echoed
+/// truncated, with `truncated = true` marking the cut.
 async fn webhook(
-    State(registry): State<Registry>,
+    State(state): State<AppState>,
     Path(source): Path<String>,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
@@ -65,7 +91,16 @@ async fn webhook(
         }
     };
     match std::str::from_utf8(&bytes) {
-        Ok(text) => tracing::info!(source, bytes = bytes.len(), body = text, "webhook received"),
+        Ok(text) => {
+            let body = truncate_at_char_boundary(text, state.body_log_limit_bytes);
+            tracing::info!(
+                source,
+                bytes = bytes.len(),
+                body,
+                truncated = body.len() < text.len(),
+                "webhook received"
+            );
+        }
         Err(_) => {
             tracing::info!(
                 source,
@@ -75,7 +110,7 @@ async fn webhook(
         }
     }
 
-    let Some(adapter) = registry.get(source.as_str()) else {
+    let Some(adapter) = state.registry.get(source.as_str()) else {
         tracing::warn!(source, "unknown webhook source");
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -117,7 +152,17 @@ mod tests {
         super::router(&WebhookConfig {
             bind: "127.0.0.1:0".parse().expect("valid addr"),
             body_limit_bytes,
+            body_log_limit_bytes: 65_536,
         })
+    }
+
+    #[test]
+    fn truncation_is_char_boundary_safe() {
+        // "é" is two bytes; a cap of 3 lands mid-character and must back up.
+        assert_eq!(super::truncate_at_char_boundary("aéé", 3), "aé");
+        assert_eq!(super::truncate_at_char_boundary("aéé", 5), "aéé");
+        assert_eq!(super::truncate_at_char_boundary("abc", 2), "ab");
+        assert_eq!(super::truncate_at_char_boundary("é", 1), "");
     }
 
     fn test_router() -> axum::Router {
@@ -138,6 +183,36 @@ mod tests {
                 Request::post("/webhook/grafana")
                     .body(Body::from(
                         include_bytes!("../fixtures/grafana/firing_single.json") as &[u8],
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("router response");
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+    }
+
+    #[tokio::test]
+    async fn parseable_pagerduty_webhook_returns_202() {
+        let response = test_router()
+            .oneshot(
+                Request::post("/webhook/pagerduty")
+                    .body(Body::from(
+                        include_bytes!("../fixtures/pagerduty/triggered.json") as &[u8],
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("router response");
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+    }
+
+    #[tokio::test]
+    async fn skipped_pagerduty_event_returns_202() {
+        let response = test_router()
+            .oneshot(
+                Request::post("/webhook/pagerduty")
+                    .body(Body::from(
+                        include_bytes!("../fixtures/pagerduty/priority_updated.json") as &[u8],
                     ))
                     .expect("build request"),
             )
