@@ -1,0 +1,35 @@
+---
+source: src/triage/mod.rs
+expression: schema
+---
+$schema: "https://json-schema.org/draft/2020-12/schema"
+title: TriageResult
+description: Triage assessment of a single alert. service is null only when no service is identifiable — never guess.
+type: object
+properties:
+  service:
+    type:
+      - string
+      - "null"
+  severity:
+    $ref: "#/$defs/Severity"
+  summary:
+    type: string
+  tags:
+    type: array
+    items:
+      type: string
+required:
+  - severity
+  - tags
+  - summary
+$defs:
+  Severity:
+    description: Incident priority. Use Unknown when the alert does not say.
+    type: string
+    enum:
+      - P1
+      - P2
+      - P3
+      - P4
+      - Unknown

@@ -1,123 +1,36 @@
-//! Spawns the real binary and checks boot, config handling, the webhook
-//! server and clean exit on signals.
-
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{SocketAddr, TcpStream};
-use std::process::{Child, ChildStdout, Command, Stdio};
-use std::time::{Duration, Instant};
-
-/// Spawns the binary with the given env vars and a watchdog that kills it
-/// after ten seconds so a hang fails the test.
-///
-/// Binds port 0 by default since parallel tests would race for a fixed
-/// port. A caller-provided `ONCALL_WEBHOOK__BIND` wins.
-fn spawn_agent(envs: &[(&str, &str)]) -> (Child, BufReader<ChildStdout>) {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_oncall-ai"));
-    cmd.stdout(Stdio::piped()).stderr(Stdio::null());
-    cmd.env("ONCALL_WEBHOOK__BIND", "127.0.0.1:0");
-    for (key, value) in envs {
-        cmd.env(key, value);
-    }
-    let mut child = cmd.spawn().expect("spawn binary");
-
-    let pid = child.id().to_string();
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(10));
-        if Command::new("kill").args(["-KILL", &pid]).status().is_err() {
-            eprintln!("watchdog: failed to send SIGKILL to {pid}");
-        }
-    });
-
-    let stdout = BufReader::new(child.stdout.take().expect("stdout piped"));
-    (child, stdout)
+// Selective include: common/mod.rs's parser helpers would be dead code here.
+mod common {
+    pub mod harness;
 }
 
-/// Reads stdout until a line contains `needle`, returning everything read.
-///
-/// # Panics
-///
-/// Panics on EOF so a crashed binary fails the test with context.
-fn read_until_contains(stdout: &mut BufReader<ChildStdout>, needle: &str) -> Vec<String> {
-    let mut lines = Vec::new();
-    loop {
-        let mut line = String::new();
-        let n = stdout.read_line(&mut line).expect("read stdout");
-        assert!(
-            n > 0,
-            "binary exited (stdout EOF) before logging {needle:?}; got:\n{}",
-            lines.join("")
-        );
-        let found = line.contains(needle);
-        lines.push(line);
-        if found {
-            return lines;
-        }
-    }
-}
+use std::io::{Read, Write};
+use std::net::TcpStream;
 
-/// Reads stdout until the readiness line.
-///
-/// The binary binds and sets up signal handlers before logging readiness,
-/// so afterwards the server accepts connections and catches SIGTERM.
-fn read_until_ready(stdout: &mut BufReader<ChildStdout>) -> Vec<String> {
-    read_until_contains(stdout, "running; ctrl-C to stop")
-}
-
-/// Extracts the bound address from the readiness line.
-///
-/// Needs JSON logs. The pretty formatter wraps field names in ANSI escapes.
-fn ready_addr(lines: &[String]) -> SocketAddr {
-    let line = lines.last().expect("readiness line present");
-    let field = line
-        .split(r#""addr":""#)
-        .nth(1)
-        .and_then(|rest| rest.split('"').next());
-    assert!(field.is_some(), "no addr field on readiness line: {line}");
-    field
-        .expect("checked by assert above")
-        .parse()
-        .expect("addr field parses as socket address")
-}
-
-fn send_sigterm(child: &Child) {
-    Command::new("kill")
-        .args(["-TERM", &child.id().to_string()])
-        .status()
-        .expect("send SIGTERM");
-}
-
-fn assert_clean_exit(mut child: Child) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if let Some(status) = child.try_wait().expect("try_wait") {
-            assert!(status.success(), "expected exit 0, got {status}");
-            return;
-        }
-        assert!(Instant::now() < deadline, "no exit within 5s of SIGTERM");
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
-fn sigterm_and_assert_clean_exit(child: Child) {
-    send_sigterm(&child);
-    assert_clean_exit(child);
-}
+use common::harness::{
+    assert_clean_exit, post, read_until_contains, read_until_ready, ready_addr, send_sigterm,
+    sigterm_and_assert_clean_exit, spawn_agent,
+};
 
 #[test]
 fn runs_until_sigterm_then_exits_cleanly() {
-    let (child, mut stdout) = spawn_agent(&[]);
-    read_until_ready(&mut stdout);
-    sigterm_and_assert_clean_exit(child);
+    let (child, mut stdout, watchdog) = spawn_agent(&[]);
+    let lines = read_until_ready(&mut stdout);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("no webhook sources enabled")),
+        "an all-defaults boot serves nothing and must warn about it, got:\n{}",
+        lines.join("")
+    );
+    sigterm_and_assert_clean_exit(child, watchdog);
 }
 
-/// `ONCALL_HOME` relocates home and `ONCALL_LOG__FORMAT` reaches
-/// `log.format`, covering prefix stripping and `__` splitting.
 #[test]
 fn oncall_env_vars_set_home_and_log_format() {
     let home = tempfile::tempdir().expect("create tempdir");
     let home_str = home.path().to_str().expect("utf-8 tempdir path");
 
-    let (child, mut stdout) =
+    let (child, mut stdout, watchdog) =
         spawn_agent(&[("ONCALL_HOME", home_str), ("ONCALL_LOG__FORMAT", "json")]);
     let lines = read_until_ready(&mut stdout);
 
@@ -131,30 +44,19 @@ fn oncall_env_vars_set_home_and_log_format() {
         "expected home resolved from ONCALL_HOME to {home_str}, got: {first}"
     );
 
-    sigterm_and_assert_clean_exit(child);
+    sigterm_and_assert_clean_exit(child, watchdog);
 }
 
-/// A POSTed Grafana fixture gets 202, shows up in the intake log and yields
-/// one log line per alert.
 #[test]
 fn webhook_roundtrip_returns_202_and_logs_alerts() {
-    let (child, mut stdout) = spawn_agent(&[("ONCALL_LOG__FORMAT", "json")]);
+    let (child, mut stdout, watchdog) = spawn_agent(&[
+        ("ONCALL_LOG__FORMAT", "json"),
+        ("ONCALL_WEBHOOK__GRAFANA__ENABLED", "true"),
+    ]);
     let addr = ready_addr(&read_until_ready(&mut stdout));
 
     let body = include_str!("../fixtures/grafana/firing_single.json");
-    let mut stream = TcpStream::connect(addr).expect("connect to server");
-    stream
-        .write_all(
-            format!(
-                "POST /webhook/grafana HTTP/1.1\r\nHost: localhost\r\n\
-                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            )
-            .as_bytes(),
-        )
-        .expect("write request");
-    let mut response = String::new();
-    stream.read_to_string(&mut response).expect("read response");
+    let response = post(addr, "/webhook/grafana", body);
     assert!(
         response.starts_with("HTTP/1.1 202"),
         "expected 202 Accepted, got: {response}"
@@ -177,14 +79,75 @@ fn webhook_roundtrip_returns_202_and_logs_alerts() {
         lines.join("")
     );
 
-    sigterm_and_assert_clean_exit(child);
+    sigterm_and_assert_clean_exit(child, watchdog);
 }
 
-/// A request in flight when SIGTERM lands still completes with 202. Sends
-/// half the body, signals, syncs on the draining line, then sends the rest.
+#[test]
+fn only_opted_in_sources_are_served() {
+    let (child, mut stdout, watchdog) = spawn_agent(&[
+        ("ONCALL_LOG__FORMAT", "json"),
+        ("ONCALL_WEBHOOK__GRAFANA__ENABLED", "true"),
+    ]);
+    let addr = ready_addr(&read_until_ready(&mut stdout));
+
+    let unconfigured = post(
+        addr,
+        "/webhook/pagerduty",
+        include_str!("../fixtures/pagerduty/triggered.json"),
+    );
+    assert!(
+        unconfigured.starts_with("HTTP/1.1 404"),
+        "a source nobody enabled must 404, got: {unconfigured}"
+    );
+
+    let enabled = post(
+        addr,
+        "/webhook/grafana",
+        include_str!("../fixtures/grafana/firing_single.json"),
+    );
+    assert!(
+        enabled.starts_with("HTTP/1.1 202"),
+        "an opted-in source must be served, got: {enabled}"
+    );
+
+    sigterm_and_assert_clean_exit(child, watchdog);
+}
+
+#[test]
+fn triage_worker_readiness_line_appears_before_running_line() {
+    let (child, mut stdout, watchdog) = spawn_agent(&[("ONCALL_LOG__FORMAT", "json")]);
+    let lines = read_until_ready(&mut stdout);
+
+    let started = lines
+        .iter()
+        .find(|line| line.contains(r#""message":"triage worker started""#));
+    assert!(
+        started.is_some(),
+        "no triage worker started line before the running line, got:\n{}",
+        lines.join("")
+    );
+    let started = started.expect("checked by assert above");
+    assert!(
+        started.contains(r#""model":""#) && started.contains(r#""endpoint":""#),
+        "worker readiness line must carry model and endpoint: {started}"
+    );
+
+    send_sigterm(&child);
+    let lines = read_until_contains(&mut stdout, "triage queue drained");
+    let drained = lines.last().expect("drained line present");
+    assert!(
+        drained.contains(r#""dropped":0"#),
+        "an idle queue must drain zero alerts: {drained}"
+    );
+    assert_clean_exit(child, watchdog);
+}
+
 #[test]
 fn inflight_request_drains_through_shutdown() {
-    let (child, mut stdout) = spawn_agent(&[("ONCALL_LOG__FORMAT", "json")]);
+    let (child, mut stdout, watchdog) = spawn_agent(&[
+        ("ONCALL_LOG__FORMAT", "json"),
+        ("ONCALL_WEBHOOK__GRAFANA__ENABLED", "true"),
+    ]);
     let addr = ready_addr(&read_until_ready(&mut stdout));
 
     let body = r#"{"alerts":[]}"#;
@@ -212,5 +175,5 @@ fn inflight_request_drains_through_shutdown() {
         "in-flight request must complete during drain, got: {response}"
     );
 
-    assert_clean_exit(child);
+    assert_clean_exit(child, watchdog);
 }

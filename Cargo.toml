@@ -2,7 +2,7 @@
 name = "oncall-ai"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.91"
 
 [lints]
 workspace = true
@@ -13,12 +13,17 @@ axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 config = { version = "0.15", default-features = false, features = ["toml"] }
+http = "1"
+rig-core = { version = "0.40", default-features = false, features = ["reqwest", "rustls"] }
+schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net"] }
+tokio = { version = "1.37", features = ["rt-multi-thread", "macros", "signal", "net", "sync", "time"] }
+tokio-util = "0.7"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1", features = ["v7"] }
 
 [dev-dependencies]
 insta = { version = "1", features = ["yaml", "redactions"] }

@@ -1,0 +1,11 @@
+---
+source: tests/triage_eval.rs
+expression: result
+---
+severity: P1
+service: checkout
+tags:
+  - error-5xx
+  - error-rate
+  - production
+summary: "Checkout service is experiencing a 5xx error rate above 2%, impacting user transactions."

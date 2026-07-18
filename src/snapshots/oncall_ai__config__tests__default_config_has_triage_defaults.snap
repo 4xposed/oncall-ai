@@ -1,0 +1,10 @@
+---
+source: src/config.rs
+expression: config.triage
+---
+model: "ollama:qwen3:8b"
+endpoint: "http://localhost:11434"
+queue_capacity: 256
+timeout_secs: 60
+backoff_initial_ms: 1000
+backoff_max_ms: 60000

@@ -1,0 +1,14 @@
+---
+source: src/triage/mod.rs
+expression: rendered
+---
+- - P1
+  - "\"P1\""
+- - P2
+  - "\"P2\""
+- - P3
+  - "\"P3\""
+- - P4
+  - "\"P4\""
+- - Unknown
+  - "\"Unknown\""

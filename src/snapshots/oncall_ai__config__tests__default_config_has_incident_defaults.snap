@@ -1,0 +1,6 @@
+---
+source: src/config.rs
+expression: config.incidents
+---
+queue_capacity: 256
+idle_ttl_secs: 86400

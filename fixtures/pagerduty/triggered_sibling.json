@@ -1,0 +1,53 @@
+{
+  "event": {
+    "id": "01BRB6ZFMPFAZQ1F0E6XDX2GZ5",
+    "event_type": "incident.triggered",
+    "resource_type": "incident",
+    "occurred_at": "2026-07-12T14:03:04.211Z",
+    "agent": {
+      "html_url": "https://acme.pagerduty.com/users/PLH1HKV",
+      "id": "PLH1HKV",
+      "self": "https://api.pagerduty.com/users/PLH1HKV",
+      "summary": "Dana Oncall",
+      "type": "user_reference"
+    },
+    "client": null,
+    "data": {
+      "id": "PGR0VU3",
+      "type": "incident",
+      "self": "https://api.pagerduty.com/incidents/PGR0VU3",
+      "html_url": "https://acme.pagerduty.com/incidents/PGR0VU3",
+      "number": 2019,
+      "status": "triggered",
+      "incident_key": "d3640fbd41094207a1c11e58e46b1662",
+      "created_at": "2026-07-12T14:03:02Z",
+      "title": "5xx rate above 2% on checkout (sibling)",
+      "service": {
+        "html_url": "https://acme.pagerduty.com/services/PF9KMXH",
+        "id": "PF9KMXH",
+        "self": "https://api.pagerduty.com/services/PF9KMXH",
+        "summary": "checkout",
+        "type": "service_reference"
+      },
+      "assignees": [],
+      "escalation_policy": {
+        "html_url": "https://acme.pagerduty.com/escalation_policies/PUS0KTE",
+        "id": "PUS0KTE",
+        "self": "https://api.pagerduty.com/escalation_policies/PUS0KTE",
+        "summary": "Default",
+        "type": "escalation_policy_reference"
+      },
+      "teams": [],
+      "priority": {
+        "html_url": "https://acme.pagerduty.com/account/incident_priorities",
+        "id": "PSO75BM",
+        "self": "https://api.pagerduty.com/priorities/PSO75BM",
+        "summary": "P1",
+        "type": "priority_reference"
+      },
+      "urgency": "high",
+      "conference_bridge": null,
+      "resolve_reason": null
+    }
+  }
+}

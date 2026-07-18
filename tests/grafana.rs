@@ -1,10 +1,16 @@
 //! Grafana adapter parsing tests.
 
-use oncall_ai::alert::{Alert, AlertSource};
+mod common;
+
+use oncall_ai::alert::Alert;
 use oncall_ai::grafana::Grafana;
 
 fn parse_fixture(body: &[u8]) -> Vec<Alert> {
-    Grafana.parse(body).expect("fixture parses")
+    common::parse_fixture(Grafana, body)
+}
+
+fn parse_err(body: &str) -> String {
+    common::parse_err(Grafana, body)
 }
 
 #[test]
@@ -43,13 +49,6 @@ fn raw_payload_is_the_alert_slice() {
 fn empty_batch_parses_to_no_alerts() {
     let alerts = parse_fixture(include_bytes!("../fixtures/grafana/empty_batch.json"));
     assert_eq!(alerts, vec![]);
-}
-
-fn parse_err(body: &str) -> String {
-    Grafana
-        .parse(body.as_bytes())
-        .expect_err("must not parse")
-        .to_string()
 }
 
 #[test]

@@ -1,0 +1,11 @@
+---
+source: tests/triage_eval.rs
+expression: result
+---
+severity: P1
+service: checkout
+tags:
+  - error
+  - rate
+  - 5xx
+summary: 5xx errors exceed 2% in checkout service

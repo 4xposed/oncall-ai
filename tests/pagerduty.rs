@@ -1,8 +1,14 @@
-use oncall_ai::alert::{Alert, AlertSource};
+mod common;
+
+use oncall_ai::alert::Alert;
 use oncall_ai::pagerduty::Pagerduty;
 
 fn parse_fixture(body: &[u8]) -> Vec<Alert> {
-    Pagerduty.parse(body).expect("fixture parses")
+    common::parse_fixture(Pagerduty, body)
+}
+
+fn parse_err(body: &str) -> String {
+    common::parse_err(Pagerduty, body)
 }
 
 #[test]
@@ -58,13 +64,6 @@ fn non_incident_event_is_skipped_without_reading_data() {
         br#"{"event": {"event_type": "service.updated", "data": {"unrelated": "shape"}}}"#,
     );
     assert_eq!(alerts, vec![]);
-}
-
-fn parse_err(body: &str) -> String {
-    Pagerduty
-        .parse(body.as_bytes())
-        .expect_err("must not parse")
-        .to_string()
 }
 
 #[test]

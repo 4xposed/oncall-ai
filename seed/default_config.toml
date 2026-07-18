@@ -2,14 +2,29 @@
 # To override you must place a config.toml next to the binary or under $ONCALL_HOME.
 # Every key is optional, when a key is not set this defaults apply.
 
-# [models]    model endpoints — arrives in M5/M7
-# [storage]   data/ paths — arrives in M6/M13
-
 [log]
 format = "pretty"   # "pretty" or "json"
 level = "info"
 
 [webhook]
 bind = "127.0.0.1:8080"
-body_limit_bytes = 1048576      # larger bodies are rejected with 413
-body_log_limit_bytes = 65536    # longest body echo in the intake log line
+body_limit_bytes = 1048576
+body_log_limit_bytes = 65536
+
+[webhook.grafana]
+enabled = false
+
+[webhook.pagerduty]
+enabled = false
+
+[incidents]
+queue_capacity = 256
+idle_ttl_secs = 86400
+
+[triage]
+model = "ollama:qwen3:8b"
+endpoint = "http://localhost:11434"
+queue_capacity = 256
+timeout_secs = 60
+backoff_initial_ms = 1000
+backoff_max_ms = 60000

@@ -1,0 +1,16 @@
+---
+source: src/triage/mod.rs
+expression: render_prompt(alert)
+---
+source: grafana
+status: firing
+started: 2026-07-12 09:03:00 UTC
+labels:
+  alertname: HighErrorRate
+  grafana_folder: Production
+  service: checkout
+  severity: critical
+annotations:
+  description: The checkout service error rate has exceeded 2% for 5 minutes.
+  runbook_url: https://runbooks.example.com/checkout-5xx
+  summary: 5xx rate above 2% on checkout
