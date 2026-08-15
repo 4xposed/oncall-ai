@@ -4,11 +4,11 @@ use oncall_ai::alert::Alert;
 use oncall_ai::pagerduty::Pagerduty;
 
 fn parse_fixture(body: &[u8]) -> Vec<Alert> {
-    common::parse_fixture(Pagerduty, body)
+    common::parse_fixture(&Pagerduty, body)
 }
 
 fn parse_err(body: &str) -> String {
-    common::parse_err(Pagerduty, body)
+    common::parse_err(&Pagerduty, body)
 }
 
 #[test]

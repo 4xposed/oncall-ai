@@ -28,3 +28,12 @@ queue_capacity = 256
 timeout_secs = 60
 backoff_initial_ms = 1000
 backoff_max_ms = 60000
+
+[investigation]
+model = "ollama:qwen3.5:27b"
+endpoint = "http://localhost:11434"
+repo_root = "."
+max_turns = 12
+timeout_secs = 300
+max_file_bytes = 32768
+queue_capacity = 256

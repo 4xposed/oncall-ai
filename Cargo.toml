@@ -14,20 +14,23 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 config = { version = "0.15", default-features = false, features = ["toml"] }
 http = "1"
-rig-core = { version = "0.40", default-features = false, features = ["reqwest", "rustls"] }
+rig-agent = { version = "0.41", default-features = false }
+rig-core = { version = "0.41", default-features = false, features = ["reqwest", "rustls"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1.37", features = ["rt-multi-thread", "macros", "signal", "net", "sync", "time"] }
+tokio = { version = "1.37", features = ["rt-multi-thread", "macros", "signal", "net", "sync", "time", "fs", "io-util"] }
 tokio-util = "0.7"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-uuid = { version = "1", features = ["v7"] }
+uuid = { version = "1", features = ["v7", "serde"] }
 
 [dev-dependencies]
 insta = { version = "1", features = ["yaml", "redactions"] }
+rig-core = { version = "0.41", default-features = false, features = ["test-utils"] }
 tempfile = "3"
+tokio = { version = "1.37", features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
 
 [workspace]
@@ -36,6 +39,11 @@ tower = { version = "0.5", features = ["util"] }
 unsafe_code = "forbid"
 
 [workspace.lints.clippy]
+doc_markdown = "warn"
+ignored_unit_patterns = "warn"
+missing_errors_doc = "warn"
+redundant_closure_for_method_calls = "warn"
+
 string_slice = "warn"
 indexing_slicing = "warn"
 unwrap_used = "warn"

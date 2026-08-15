@@ -1,4 +1,5 @@
 use super::{TRIAGE_PREAMBLE, TriageResult, render_prompt};
+use crate::config::{ModelProvider, TriageConfig};
 use rig_core::client::{CompletionClient, Nothing};
 use rig_core::completion::{AssistantContent, CompletionError, CompletionModel as _};
 use rig_core::http_client;
@@ -7,11 +8,78 @@ use std::time::Duration;
 
 const OUTPUT_SNIPPET_BYTES: usize = 200;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ErrorClass {
-    Transport,
-    Model,
-    Output,
+pub struct Triager {
+    model: ollama::CompletionModel,
+    timeout: Duration,
+}
+
+impl Triager {
+    /// # Errors
+    ///
+    /// Fails on a non-Ollama provider or when the client cannot be built.
+    pub fn new(config: &TriageConfig) -> Result<Self, BuildError> {
+        match config.model.provider {
+            ModelProvider::Ollama => {}
+            provider @ ModelProvider::Anthropic => {
+                return Err(BuildError::UnsupportedProvider { provider });
+            }
+        }
+        let client = ollama::Client::builder()
+            .api_key(Nothing)
+            .base_url(&config.endpoint)
+            .build()
+            .map_err(|source| BuildError::Client {
+                endpoint: config.endpoint.clone(),
+                source,
+            })?;
+        Ok(Self {
+            model: client.completion_model(&config.model.model),
+            timeout: Duration::from_secs(config.timeout_secs.get()),
+        })
+    }
+
+    /// # Errors
+    ///
+    /// Fails on timeout, a completion error, or output that is not a
+    /// [`TriageResult`]; [`TriageError::class`] tells the classes apart.
+    pub async fn triage(&self, alert: &crate::alert::Alert) -> Result<TriageResult, TriageError> {
+        let call = self
+            .model
+            .completion_request(render_prompt(alert))
+            .preamble(TRIAGE_PREAMBLE.to_owned())
+            .output_schema(schemars::schema_for!(TriageResult))
+            .additional_params(serde_json::json!({ "seed": 42 }))
+            .temperature_opt(ModelProvider::Ollama.temperature())
+            .send();
+        let response = match tokio::time::timeout(self.timeout, call).await {
+            Ok(outcome) => outcome?,
+            Err(_elapsed) => return Err(TriageError::Timeout(self.timeout)),
+        };
+        let text = response
+            .choice
+            .iter()
+            .find_map(|content| match content {
+                AssistantContent::Text(text) => Some(text.text.as_str()),
+                _ => None,
+            })
+            .ok_or(TriageError::MissingText)?;
+        serde_json::from_str(text).map_err(|source| TriageError::UnparseableOutput {
+            snippet: crate::text::truncate_utf8(text, OUTPUT_SNIPPET_BYTES).to_owned(),
+            source,
+        })
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum BuildError {
+    #[error("failed to build triage client for endpoint {endpoint}")]
+    Client {
+        endpoint: String,
+        #[source]
+        source: http_client::Error,
+    },
+    #[error("triage.model names provider {provider}; triage supports only ollama")]
+    UnsupportedProvider { provider: ModelProvider },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -28,6 +96,13 @@ pub enum TriageError {
         #[source]
         source: serde_json::Error,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorClass {
+    Transport,
+    Model,
+    Output,
 }
 
 impl TriageError {
@@ -49,64 +124,6 @@ fn classify_completion(error: &CompletionError) -> ErrorClass {
             _ => ErrorClass::Transport,
         },
         _ => ErrorClass::Model,
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error("failed to build triage client for endpoint {endpoint}")]
-pub struct BuildError {
-    endpoint: String,
-    #[source]
-    source: http_client::Error,
-}
-
-pub struct Triager {
-    model: ollama::CompletionModel,
-    timeout: Duration,
-}
-
-impl Triager {
-    pub fn new(config: &crate::config::TriageConfig) -> Result<Self, BuildError> {
-        let crate::config::ModelProvider::Ollama = config.model.provider;
-        let client = ollama::Client::builder()
-            .api_key(Nothing)
-            .base_url(&config.endpoint)
-            .build()
-            .map_err(|source| BuildError {
-                endpoint: config.endpoint.clone(),
-                source,
-            })?;
-        Ok(Self {
-            model: client.completion_model(&config.model.model),
-            timeout: Duration::from_secs(config.timeout_secs.get()),
-        })
-    }
-
-    pub async fn triage(&self, alert: &crate::alert::Alert) -> Result<TriageResult, TriageError> {
-        let call = self
-            .model
-            .completion_request(render_prompt(alert))
-            .preamble(TRIAGE_PREAMBLE.to_owned())
-            .output_schema(schemars::schema_for!(TriageResult))
-            .temperature(0.0)
-            .additional_params(serde_json::json!({ "seed": 42 }))
-            .send();
-        let response = match tokio::time::timeout(self.timeout, call).await {
-            Ok(outcome) => outcome?,
-            Err(_elapsed) => return Err(TriageError::Timeout(self.timeout)),
-        };
-        let text = response
-            .choice
-            .iter()
-            .find_map(|content| match content {
-                AssistantContent::Text(text) => Some(text.text.as_str()),
-                _ => None,
-            })
-            .ok_or(TriageError::MissingText)?;
-        serde_json::from_str(text).map_err(|source| TriageError::UnparseableOutput {
-            snippet: crate::log::truncate_utf8(text, OUTPUT_SNIPPET_BYTES).to_owned(),
-            source,
-        })
     }
 }
 
@@ -239,6 +256,25 @@ mod tests {
 
     fn test_triager(addr: SocketAddr) -> Triager {
         Triager::new(&test_config(addr)).expect("triager builds")
+    }
+
+    /// Triage is Ollama-only; a non-Ollama spec must die at build, not at
+    /// the first call.
+    #[test]
+    fn unsupported_provider_fails_to_build() {
+        let mut config = test_config("192.0.2.1:1".parse().expect("valid addr"));
+        config.model = ModelSpec {
+            provider: ModelProvider::Anthropic,
+            model: "claude-sonnet-5".to_owned(),
+        };
+        let Err(error) = Triager::new(&config) else {
+            panic!("anthropic must not build");
+        };
+        assert!(matches!(error, BuildError::UnsupportedProvider { .. }));
+        assert!(
+            error.to_string().contains("triage.model") && error.to_string().contains("anthropic"),
+            "error must name the key and the provider, got: {error}"
+        );
     }
 
     #[tokio::test]

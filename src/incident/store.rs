@@ -18,11 +18,16 @@ pub trait IncidentStore {
         now: DateTime<Utc>,
     );
     fn set_triage(&mut self, id: IncidentId, triage: crate::triage::TriageResult);
+    fn set_investigation(
+        &mut self,
+        id: IncidentId,
+        investigation: crate::investigation::Investigation,
+    );
     fn close(&mut self, id: IncidentId, reason: CloseReason, now: DateTime<Utc>);
     fn expire_idle_before(&mut self, cutoff: DateTime<Utc>, now: DateTime<Utc>) -> Vec<IncidentId>;
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct InMemoryStore {
     incidents: HashMap<IncidentId, Incident>,
     open_by_alert: HashMap<(String, String), IncidentId>,
@@ -109,6 +114,16 @@ impl IncidentStore for InMemoryStore {
     fn set_triage(&mut self, id: IncidentId, triage: crate::triage::TriageResult) {
         if let Some(incident) = self.get_mut(id) {
             incident.triage = Some(triage);
+        }
+    }
+
+    fn set_investigation(
+        &mut self,
+        id: IncidentId,
+        investigation: crate::investigation::Investigation,
+    ) {
+        if let Some(incident) = self.get_mut(id) {
+            incident.investigation = Some(investigation);
         }
     }
 
@@ -225,6 +240,17 @@ mod tests {
     }
 
     #[test]
+    fn set_investigation_records_the_transcript_and_hypothesis() {
+        let mut store = InMemoryStore::new();
+        let id = open_test_incident(&mut store);
+        store.set_investigation(id, crate::investigation::test_investigation(id));
+        assert_eq!(
+            store.get(id).expect("present").investigation.as_ref(),
+            Some(&crate::investigation::test_investigation(id))
+        );
+    }
+
+    #[test]
     fn set_triage_records_the_result() {
         let mut store = InMemoryStore::new();
         let id = open_test_incident(&mut store);
@@ -324,6 +350,7 @@ mod tests {
                 summary: "stub".to_owned(),
             },
         );
+        store.set_investigation(id, crate::investigation::test_investigation(id));
         store.close(id, CloseReason::Resolved, now);
 
         assert!(store.get(id).is_none());

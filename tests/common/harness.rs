@@ -17,6 +17,7 @@ pub fn spawn_agent(envs: &[(&str, &str)]) -> (Child, BufReader<ChildStdout>, Wat
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_oncall-ai"));
     cmd.stdout(Stdio::piped()).stderr(Stdio::null());
     cmd.env("ONCALL_WEBHOOK__BIND", "127.0.0.1:0");
+    cmd.env_remove("ANTHROPIC_API_KEY");
     for (key, value) in envs {
         cmd.env(key, value);
     }

@@ -7,9 +7,9 @@ mod store;
 mod worker;
 pub use dedupe::{Decision, decide};
 pub use store::{InMemoryStore, IncidentStore};
-pub use worker::{TRIAGED_CAPACITY, TriageRequest, Triaged, worker};
+pub use worker::{Channels, INVESTIGATED_CAPACITY, TRIAGED_CAPACITY, worker};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
 pub struct IncidentId(uuid::Uuid);
 
 impl IncidentId {
@@ -79,6 +79,7 @@ pub struct Incident {
     pub key: DedupeKey,
     pub alerts: Vec<Alert>,
     pub triage: Option<crate::triage::TriageResult>,
+    pub investigation: Option<crate::investigation::Investigation>,
     pub opened_at: DateTime<Utc>,
     pub last_activity_at: DateTime<Utc>,
 }
@@ -93,6 +94,7 @@ impl Incident {
             key,
             alerts: vec![alert],
             triage: None,
+            investigation: None,
             opened_at: now,
             last_activity_at: now,
         }

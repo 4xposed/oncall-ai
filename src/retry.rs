@@ -6,6 +6,9 @@ pub struct Backoff {
     pub max: Duration,
 }
 
+/// # Errors
+///
+/// Returns the first error `keep_trying` declines to retry.
 pub async fn with_backoff<T, E, Fut>(
     backoff: Backoff,
     mut keep_trying: impl FnMut(&E) -> bool,

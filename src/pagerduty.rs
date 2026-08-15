@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
-/// The PagerDuty alert.
+/// The `PagerDuty` alert source.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Pagerduty;
 
@@ -24,7 +24,7 @@ struct PagerdutyEventData {
     data: PagerdutyIncident,
 }
 
-/// PagerDuty's incident object.
+/// `PagerDuty`'s incident object.
 #[derive(Deserialize)]
 struct PagerdutyIncident {
     id: String,

@@ -1,10 +1,11 @@
 pub mod alert;
-pub mod cli;
 pub mod config;
 pub mod grafana;
 pub mod incident;
+pub mod investigation;
 pub mod log;
 pub mod pagerduty;
 pub mod retry;
+mod text;
 pub mod triage;
 pub mod webhook;

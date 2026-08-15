@@ -35,6 +35,10 @@ fn registry(config: &WebhookConfig) -> Registry {
 }
 
 /// Serves `router` until `shutdown` resolves, then drains in-flight requests.
+///
+/// # Errors
+///
+/// Fails when the server cannot accept connections.
 pub async fn serve(
     listener: tokio::net::TcpListener,
     router: Router,
@@ -78,7 +82,7 @@ async fn webhook(
     };
     match std::str::from_utf8(&bytes) {
         Ok(text) => {
-            let body = crate::log::truncate_utf8(text, state.body_log_limit_bytes);
+            let body = crate::text::truncate_utf8(text, state.body_log_limit_bytes);
             tracing::info!(
                 source,
                 bytes = bytes.len(),

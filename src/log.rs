@@ -34,26 +34,10 @@ pub fn init(cfg: &LogConfig) -> Result<(), LoggingError> {
     Ok(())
 }
 
-/// The longest prefix of `text` within `max_bytes` that doesn't split a
-/// character; the `get` shape stays `string_slice`-clean without exceptions.
-pub(crate) fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
-    text.get(..text.floor_char_boundary(max_bytes))
-        .unwrap_or_default()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{LogConfig, LogFormat};
-
-    #[test]
-    fn truncate_utf8_rounds_down_to_a_char_boundary() {
-        // 'é' is two bytes: a cut inside it must round down, not panic.
-        assert_eq!(truncate_utf8("aé", 2), "a");
-        assert_eq!(truncate_utf8("aé", 3), "aé");
-        assert_eq!(truncate_utf8("abc", 10), "abc");
-        assert_eq!(truncate_utf8("", 5), "");
-    }
 
     #[test]
     fn bad_level_filter_fails_loud() {

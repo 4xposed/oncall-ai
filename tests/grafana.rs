@@ -6,11 +6,11 @@ use oncall_ai::alert::Alert;
 use oncall_ai::grafana::Grafana;
 
 fn parse_fixture(body: &[u8]) -> Vec<Alert> {
-    common::parse_fixture(Grafana, body)
+    common::parse_fixture(&Grafana, body)
 }
 
 fn parse_err(body: &str) -> String {
-    common::parse_err(Grafana, body)
+    common::parse_err(&Grafana, body)
 }
 
 #[test]

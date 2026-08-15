@@ -1,4 +1,4 @@
-use super::{ErrorClass, TriageError, TriageResult, Triager};
+use super::{ErrorClass, TriageError, TriageRequest, TriageResult, Triaged, Triager};
 use tokio_util::sync::CancellationToken;
 
 const OUTPUT_ERROR_ATTEMPTS: u32 = 3;
@@ -20,10 +20,10 @@ impl Triage for Triager {
 }
 
 pub async fn worker(
-    mut requests_rx: tokio::sync::mpsc::Receiver<crate::incident::TriageRequest>,
+    mut requests_rx: tokio::sync::mpsc::Receiver<TriageRequest>,
     triager: impl Triage,
     backoff: crate::retry::Backoff,
-    done_tx: tokio::sync::mpsc::Sender<crate::incident::Triaged>,
+    done_tx: tokio::sync::mpsc::Sender<Triaged>,
     shutdown: CancellationToken,
 ) -> usize {
     let mut dropped: usize = 0;
@@ -58,11 +58,11 @@ pub async fn worker(
         };
         log_outcome(&request, result.as_ref());
         if let Ok(result) = result {
-            let triaged = crate::incident::Triaged {
+            let message = Triaged {
                 incident: request.incident,
                 result,
             };
-            if done_tx.send(triaged).await.is_err() {
+            if done_tx.send(message).await.is_err() {
                 tracing::warn!(
                     incident_id = %request.incident,
                     "triage result dropped; incident worker gone"
@@ -77,10 +77,7 @@ pub async fn worker(
     dropped
 }
 
-fn log_outcome(
-    request: &crate::incident::TriageRequest,
-    result: Result<&TriageResult, &TriageError>,
-) {
+fn log_outcome(request: &TriageRequest, result: Result<&TriageResult, &TriageError>) {
     match result {
         Ok(triage) => tracing::info!(
             incident_id = %request.incident,
@@ -120,8 +117,8 @@ mod tests {
         }
     }
 
-    fn request(alert: crate::alert::Alert) -> crate::incident::TriageRequest {
-        crate::incident::TriageRequest {
+    fn request(alert: crate::alert::Alert) -> TriageRequest {
+        TriageRequest {
             incident: crate::incident::IncidentId::new(),
             alert,
         }

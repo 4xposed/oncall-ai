@@ -6,6 +6,20 @@ mod worker;
 pub use triager::{BuildError, ErrorClass, TriageError, Triager};
 pub use worker::{Triage, worker};
 
+use crate::incident::IncidentId;
+
+#[derive(Debug)]
+pub struct TriageRequest {
+    pub incident: IncidentId,
+    pub alert: crate::alert::Alert,
+}
+
+#[derive(Debug)]
+pub struct Triaged {
+    pub incident: IncidentId,
+    pub result: TriageResult,
+}
+
 pub const TRIAGE_PREAMBLE: &str = r#"You triage alerts for an on-call engineer.
 
 Given one alert, produce:

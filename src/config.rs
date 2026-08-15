@@ -57,6 +57,7 @@ pub struct Config {
     pub webhook: WebhookConfig,
     pub incidents: IncidentsConfig,
     pub triage: TriageConfig,
+    pub investigation: InvestigationConfig,
 }
 
 /// Incident store and dedupe settings.
@@ -96,17 +97,49 @@ impl TriageConfig {
     }
 }
 
+/// Investigation stage: model, endpoint, repo access and turn budget.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InvestigationConfig {
+    pub model: ModelSpec,
+    pub endpoint: String,
+    pub repo_root: PathBuf,
+    pub max_turns: NonZeroUsize,
+    pub timeout_secs: NonZeroU64,
+    pub max_file_bytes: NonZeroUsize,
+    pub queue_capacity: NonZeroUsize,
+}
+
+impl InvestigationConfig {
+    #[must_use]
+    pub fn timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.timeout_secs.get())
+    }
+}
+
 /// A model provider recognized in [`ModelSpec`]'s `<provider>:<model>` form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelProvider {
+    Anthropic,
     Ollama,
 }
 
 impl fmt::Display for ModelProvider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            ModelProvider::Anthropic => "anthropic",
             ModelProvider::Ollama => "ollama",
         })
+    }
+}
+
+impl ModelProvider {
+    #[must_use]
+    pub const fn temperature(self) -> Option<f64> {
+        match self {
+            ModelProvider::Ollama => Some(0.0),
+            ModelProvider::Anthropic => None,
+        }
     }
 }
 
@@ -120,15 +153,23 @@ pub struct ModelSpec {
     pub(crate) model: String,
 }
 
-/// An error from parsing a [`ModelSpec`].
+impl ModelSpec {
+    #[must_use]
+    pub const fn provider(&self) -> ModelProvider {
+        self.provider
+    }
+}
+
+/// An error from parsing a [`ModelSpec`]. The offending key is left to the
+/// config layer, which appends it: the type backs more than one table.
 #[derive(Debug, thiserror::Error)]
 pub enum ModelSpecError {
     #[error(
-        "triage.model must be \"<provider>:<model>\" (e.g. \"ollama:qwen3:8b\"); \
-         got {got:?}; supported providers: ollama"
+        "model must be \"<provider>:<model>\" (e.g. \"ollama:qwen3:8b\"); \
+         got {got:?}; supported providers: anthropic, ollama"
     )]
     BadFormat { got: String },
-    #[error("triage.model names unknown provider {provider:?}; supported providers: ollama")]
+    #[error("model names unknown provider {provider:?}; supported providers: anthropic, ollama")]
     UnknownProvider { provider: String },
 }
 
@@ -138,6 +179,10 @@ impl TryFrom<String> for ModelSpec {
     fn try_from(value: String) -> Result<Self, Self::Error> {
         match value.split_once(':') {
             Some((provider, model)) if !model.is_empty() => match provider {
+                "anthropic" => Ok(ModelSpec {
+                    provider: ModelProvider::Anthropic,
+                    model: model.to_owned(),
+                }),
                 "ollama" => Ok(ModelSpec {
                     provider: ModelProvider::Ollama,
                     model: model.to_owned(),
@@ -251,8 +296,8 @@ pub enum ConfigError {
 /// # Errors
 ///
 /// Fails on a malformed `config.toml` or an invalid merged result
-/// (degenerate `[triage]` or `[incidents]` values, bad `triage.model` form, an unknown
-/// `[webhook]` key).
+/// (degenerate `[triage]`, `[incidents]` or `[investigation]` values, a bad
+/// `model` form, a missing `investigation.repo_root`, an unknown `[webhook]` key).
 pub fn load(home: &Path) -> Result<(Config, ConfigSource), ConfigError> {
     load_with_env(
         home,
@@ -281,7 +326,7 @@ fn load_with_env(
     let config: Config = builder
         .add_source(env)
         .build()
-        .and_then(|merged| merged.try_deserialize())
+        .and_then(config::Config::try_deserialize)
         .map_err(|e| match &source {
             ConfigSource::File(path) => ConfigError::File {
                 path: path.clone(),
@@ -302,15 +347,25 @@ fn validate(config: &Config) -> Result<(), config::ConfigError> {
             "triage.backoff_max_ms must be at least triage.backoff_initial_ms".to_owned(),
         ));
     }
-    validate_endpoint(&config.triage.endpoint)
+    validate_endpoint("triage.endpoint", &config.triage.endpoint)?;
+    validate_endpoint("investigation.endpoint", &config.investigation.endpoint)?;
+    if config.investigation.max_turns.get() < 2 {
+        return Err(config::ConfigError::Message(
+            "investigation.max_turns must be at least 2: the initial model call counts \
+             against the budget, so 1 lets the model request a tool whose result it can \
+             never see"
+                .to_owned(),
+        ));
+    }
+    validate_repo_root(&config.investigation.repo_root)
 }
 
 /// A malformed endpoint would otherwise surface as Transport-class errors
 /// retried forever, stalling intake behind a boot-time typo.
-fn validate_endpoint(endpoint: &str) -> Result<(), config::ConfigError> {
+fn validate_endpoint(key: &str, endpoint: &str) -> Result<(), config::ConfigError> {
     let invalid = |reason: &str| {
         config::ConfigError::Message(format!(
-            "triage.endpoint must be an absolute http(s) URL \
+            "{key} must be an absolute http(s) URL \
              (e.g. \"http://localhost:11434\"); {reason}: {endpoint:?}"
         ))
     };
@@ -324,6 +379,24 @@ fn validate_endpoint(endpoint: &str) -> Result<(), config::ConfigError> {
         return Err(invalid("missing host"));
     }
     Ok(())
+}
+
+/// A typo would otherwise surface as every tool call failing mid-run, after
+/// the tokens that got there are spent.
+fn validate_repo_root(repo_root: &Path) -> Result<(), config::ConfigError> {
+    if repo_root.is_dir() {
+        return Ok(());
+    }
+    let reason = if repo_root.exists() {
+        "not a directory"
+    } else {
+        "does not exist"
+    };
+    Err(config::ConfigError::Message(format!(
+        "investigation.repo_root must be an existing directory (the read_file tool is \
+         pinned to it); {reason}: {}",
+        repo_root.display()
+    )))
 }
 
 #[cfg(test)]
@@ -362,7 +435,7 @@ mod tests {
         let config: Config = config::Config::builder()
             .add_source(File::from_str(DEFAULT_CONFIG, FileFormat::Toml))
             .build()
-            .and_then(|merged| merged.try_deserialize())
+            .and_then(config::Config::try_deserialize)
             .expect("embedded default_config.toml must parse into Config");
         assert_eq!(config.log.format, LogFormat::Pretty);
         assert_eq!(config.log.level, "info");
@@ -527,6 +600,18 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_model_spec_parses() {
+        let spec: ModelSpec = "anthropic:claude-sonnet-5".parse().expect("valid spec");
+        assert_eq!(spec.to_string(), "anthropic:claude-sonnet-5");
+    }
+
+    #[test]
+    fn sampling_policy_is_per_provider() {
+        assert_eq!(ModelProvider::Anthropic.temperature(), None);
+        assert_eq!(ModelProvider::Ollama.temperature(), Some(0.0));
+    }
+
+    #[test]
     fn provider_model_splits_on_first_colon() {
         let home = home_with(Some("[triage]\nmodel = \"ollama:qwen3:8b\""));
         let (config, _) = load_with_env(home.path(), no_env()).expect("valid model loads");
@@ -644,6 +729,151 @@ mod tests {
         let home = home_with(Some("[incidents]\nidle_ttl_secs = 60"));
         let (config, _) = load_with_env(home.path(), no_env()).expect("valid config loads");
         assert_eq!(config.incidents.idle_ttl(), chrono::TimeDelta::seconds(60));
+    }
+
+    #[test]
+    fn default_config_has_investigation_defaults() {
+        let home = home_with(None);
+        let (config, _) = load_with_env(home.path(), no_env()).expect("defaults load");
+        insta::assert_yaml_snapshot!(config.investigation);
+    }
+
+    #[test]
+    fn zero_investigation_queue_capacity_fails_loud_with_key() {
+        let home = home_with(Some("[investigation]\nqueue_capacity = 0"));
+        let err = load_with_env(home.path(), no_env()).expect_err("must fail");
+        assert!(matches!(err, ConfigError::File { .. }));
+        assert!(
+            err.to_string().contains("investigation.queue_capacity"),
+            "error must name the key: {err}"
+        );
+    }
+
+    #[test]
+    fn zero_investigation_timeout_secs_fails_loud_with_key() {
+        let home = home_with(Some("[investigation]\ntimeout_secs = 0"));
+        let err = load_with_env(home.path(), no_env()).expect_err("must fail");
+        assert!(matches!(err, ConfigError::File { .. }));
+        assert!(
+            err.to_string().contains("investigation.timeout_secs"),
+            "error must name the key: {err}"
+        );
+    }
+
+    #[test]
+    fn zero_max_turns_fails_loud_with_key() {
+        let home = home_with(Some("[investigation]\nmax_turns = 0"));
+        let err = load_with_env(home.path(), no_env()).expect_err("must fail");
+        assert!(matches!(err, ConfigError::File { .. }));
+        assert!(
+            err.to_string().contains("investigation.max_turns"),
+            "error must name the key: {err}"
+        );
+    }
+
+    #[test]
+    fn zero_max_file_bytes_fails_loud_with_key() {
+        let home = home_with(Some("[investigation]\nmax_file_bytes = 0"));
+        let err = load_with_env(home.path(), no_env()).expect_err("must fail");
+        assert!(matches!(err, ConfigError::File { .. }));
+        assert!(
+            err.to_string().contains("investigation.max_file_bytes"),
+            "error must name the key: {err}"
+        );
+    }
+
+    /// One turn is the whole budget spent on the initial call, so a tool the
+    /// model requests can never come back. The error has to say why.
+    #[test]
+    fn one_max_turn_fails_loud_explaining_the_initial_call() {
+        let home = home_with(Some("[investigation]\nmax_turns = 1"));
+        let err = load_with_env(home.path(), no_env()).expect_err("must fail");
+        assert!(matches!(err, ConfigError::Invalid(_)));
+        let message = err.to_string();
+        assert!(
+            message.contains("investigation.max_turns"),
+            "error must name the key: {err}"
+        );
+        assert!(
+            message.contains("initial"),
+            "error must explain that the initial model call counts: {err}"
+        );
+    }
+
+    #[test]
+    fn missing_repo_root_fails_loud_with_key() {
+        let elsewhere = tempfile::tempdir().expect("create tempdir");
+        let missing = elsewhere.path().join("no-such-repo");
+        let literal = format!("{:?}", missing.display().to_string());
+        let home = home_with(Some(&format!("[investigation]\nrepo_root = {literal}")));
+        let err = load_with_env(home.path(), no_env()).expect_err("must fail");
+        assert!(matches!(err, ConfigError::Invalid(_)));
+        let message = err.to_string();
+        assert!(
+            message.contains("investigation.repo_root") && message.contains("no-such-repo"),
+            "error must name the key and the path: {err}"
+        );
+    }
+
+    #[test]
+    fn repo_root_pointing_at_a_file_fails_loud() {
+        let elsewhere = tempfile::tempdir().expect("create tempdir");
+        let file = elsewhere.path().join("not-a-repo.txt");
+        std::fs::write(&file, "a file, not a directory").expect("write file");
+        let literal = format!("{:?}", file.display().to_string());
+        let home = home_with(Some(&format!("[investigation]\nrepo_root = {literal}")));
+        let err = load_with_env(home.path(), no_env()).expect_err("must fail");
+        assert!(matches!(err, ConfigError::Invalid(_)));
+        assert!(
+            err.to_string().contains("investigation.repo_root"),
+            "error must name the key: {err}"
+        );
+    }
+
+    #[test]
+    fn unknown_investigation_key_fails_loud() {
+        let home = home_with(Some("[investigation]\nmax_tokens = 500"));
+        let err = load_with_env(home.path(), no_env()).expect_err("must fail");
+        assert!(matches!(err, ConfigError::File { .. }));
+        assert!(
+            err.to_string().contains("max_tokens"),
+            "error must name the unknown key: {err}"
+        );
+    }
+
+    #[test]
+    fn investigation_endpoint_without_scheme_fails_loud_with_key() {
+        let home = home_with(Some("[investigation]\nendpoint = \"localhost:11434\""));
+        let err = load_with_env(home.path(), no_env()).expect_err("must fail");
+        assert!(matches!(err, ConfigError::Invalid(_)));
+        assert!(
+            err.to_string().contains("investigation.endpoint"),
+            "error must name the key: {err}"
+        );
+    }
+
+    /// The model spec is shared with `[triage]`; its error must not blame the
+    /// wrong table.
+    #[test]
+    fn bad_investigation_model_names_the_investigation_key() {
+        let home = home_with(Some("[investigation]\nmodel = \"openai:gpt-5.5\""));
+        let err = load_with_env(home.path(), no_env()).expect_err("must fail");
+        assert!(matches!(err, ConfigError::File { .. }));
+        let message = err.to_string();
+        assert!(
+            message.contains("investigation.model") && !message.contains("triage.model"),
+            "error must name the offending key and only that key: {err}"
+        );
+    }
+
+    #[test]
+    fn investigation_timeout_maps_to_a_duration() {
+        let home = home_with(Some("[investigation]\ntimeout_secs = 90"));
+        let (config, _) = load_with_env(home.path(), no_env()).expect("valid config loads");
+        assert_eq!(
+            config.investigation.timeout(),
+            std::time::Duration::from_secs(90)
+        );
     }
 
     #[test]

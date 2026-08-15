@@ -1,0 +1,37 @@
+---
+source: src/investigation/mod.rs
+expression: sample()
+---
+incident: "[incident-id]"
+model: "ollama:qwen3:8b"
+outcome: Completed
+usage:
+  input_tokens: 1024
+  cached_input_tokens: 512
+  cache_creation_input_tokens: 128
+  output_tokens: 256
+  total_tokens: 1920
+requests: 2
+duration_ms: 4200
+steps:
+  - kind: reasoning
+    turn: 1
+    text: The alert names checkout-api; read its timeout config.
+  - kind: tool_call
+    turn: 1
+    name: read_file
+    args:
+      path: services/checkout/config.yaml
+    result: no such file under repo_root; use a path relative to the repo root
+    outcome:
+      Failed:
+        kind: NotFound
+    truncated: false
+  - kind: tool_call
+    turn: 1
+    name: read_file
+    args:
+      path: services/checkout/pool.toml
+    result: "max_connections = 4\n"
+    outcome: Succeeded
+    truncated: true
