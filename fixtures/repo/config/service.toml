@@ -1,0 +1,14 @@
+# Runtime settings for the checkout service.
+
+bind = "0.0.0.0:8080"
+database_url = "postgres://checkout@db.internal:5432/checkout"
+
+[payments]
+url = "https://payments.internal/v2"
+timeout_ms = 2000
+max_retries = 2
+
+[features]
+# Reserve inventory before charging the card. Reverting this would change the
+# order of operations in the /checkout handler, not the error rate.
+reserve_before_charge = true

@@ -1,0 +1,22 @@
+# Connection pool sizing for the checkout service.
+#
+# One pool is opened per process, and the minimums below are per environment.
+# They were set by the 2026-05 capacity review, which measured peak checkout concurrency at 28 in-flight queries per process during a Friday evening promotion.
+#
+# A pool smaller than the environment minimum makes requests queue on connection acquisition.
+# Once acquisition exceeds acquire_timeout_ms the handler gives up and returns 503, so undersizing the pool shows up as a 5xx error rate rather than as latency.
+
+[production]
+min_connections = 32
+max_connections = 64
+acquire_timeout_ms = 250
+
+[staging]
+min_connections = 8
+max_connections = 16
+acquire_timeout_ms = 250
+
+[development]
+min_connections = 2
+max_connections = 4
+acquire_timeout_ms = 1000
