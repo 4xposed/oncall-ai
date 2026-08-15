@@ -143,6 +143,59 @@ fn triage_worker_readiness_line_appears_before_running_line() {
 }
 
 #[test]
+fn investigation_worker_readiness_line_appears_before_running_line() {
+    let (child, mut stdout, watchdog) = spawn_agent(&[("ONCALL_LOG__FORMAT", "json")]);
+    let lines = read_until_ready(&mut stdout);
+
+    let started = lines
+        .iter()
+        .find(|line| line.contains(r#""message":"investigation worker started""#));
+    assert!(
+        started.is_some(),
+        "no investigation worker started line before the running line, got:\n{}",
+        lines.join("")
+    );
+    let started = started.expect("checked by assert above");
+    assert!(
+        started.contains(r#""model":""#) && started.contains(r#""max_turns":"#),
+        "worker readiness line must carry model and max_turns: {started}"
+    );
+    // repo_root defaults to ".", which resolves against the working directory:
+    // the line must carry what the tool resolved, not what was configured.
+    assert!(
+        started.contains(r#""repo_root":"/"#),
+        "repo_root must be logged as the resolved absolute path: {started}"
+    );
+
+    sigterm_and_assert_clean_exit(child, watchdog);
+}
+
+/// The key is read at startup, so a missing one must kill the boot before
+/// anything claims to be running.
+#[test]
+fn anthropic_investigation_without_a_key_fails_before_the_readiness_line() {
+    let (mut child, mut stdout, watchdog) = spawn_agent(&[
+        ("ONCALL_LOG__FORMAT", "json"),
+        ("ONCALL_INVESTIGATION__MODEL", "anthropic:claude-sonnet-5"),
+    ]);
+
+    let mut logs = String::new();
+    stdout
+        .read_to_string(&mut logs)
+        .expect("read stdout to EOF");
+    assert!(
+        !logs.contains("running; ctrl-C to stop"),
+        "boot must fail before the readiness line, got:\n{logs}"
+    );
+    let status = child.wait().expect("wait for exit");
+    assert!(
+        !status.success(),
+        "a missing ANTHROPIC_API_KEY must fail the boot, got: {status}"
+    );
+    watchdog.disarm();
+}
+
+#[test]
 fn inflight_request_drains_through_shutdown() {
     let (child, mut stdout, watchdog) = spawn_agent(&[
         ("ONCALL_LOG__FORMAT", "json"),
