@@ -2,8 +2,11 @@ use std::fmt;
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
 
-use config::{Environment, File, FileFormat, Source};
+use config::{File, FileFormat};
 use serde::{Deserialize, Serialize};
+
+pub use crate::model::ModelSpec;
+use crate::model::ProviderConfigs;
 
 /// Load defaults.
 pub const DEFAULT_CONFIG: &str = include_str!("../seed/default_config.toml");
@@ -49,13 +52,14 @@ pub fn resolve_home(env_override: Option<PathBuf>) -> Result<(PathBuf, HomeSourc
     Ok((dir.to_path_buf(), HomeSource::ExeDir))
 }
 
-/// The full agent configuration. Lenient about unknown top-level keys:
-/// `ONCALL_HOME` reaches the merged map as a top-level `home` key.
-#[derive(Debug, PartialEq, Eq, Deserialize)]
+/// The full agent configuration.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     pub log: LogConfig,
     pub webhook: WebhookConfig,
     pub incidents: IncidentsConfig,
+    pub providers: ProviderConfigs,
     pub triage: TriageConfig,
     pub investigation: InvestigationConfig,
 }
@@ -75,12 +79,13 @@ impl IncidentsConfig {
     }
 }
 
-/// Triage stage: model, endpoint, queue and retry policy.
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Triage stage: model, sampling, queue and retry policy.
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TriageConfig {
     pub model: ModelSpec,
-    pub endpoint: String,
+    #[serde(default)]
+    pub temperature: Option<f64>,
     pub queue_capacity: NonZeroUsize,
     pub timeout_secs: NonZeroU64,
     pub backoff_initial_ms: NonZeroU64,
@@ -97,12 +102,13 @@ impl TriageConfig {
     }
 }
 
-/// Investigation stage: model, endpoint, repo access and turn budget.
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Investigation stage: model, sampling, repo access and turn budget.
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InvestigationConfig {
     pub model: ModelSpec,
-    pub endpoint: String,
+    #[serde(default)]
+    pub temperature: Option<f64>,
     pub repo_root: PathBuf,
     pub max_turns: NonZeroUsize,
     pub timeout_secs: NonZeroU64,
@@ -114,105 +120,6 @@ impl InvestigationConfig {
     #[must_use]
     pub fn timeout(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.timeout_secs.get())
-    }
-}
-
-/// A model provider recognized in [`ModelSpec`]'s `<provider>:<model>` form.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ModelProvider {
-    Anthropic,
-    Ollama,
-}
-
-impl fmt::Display for ModelProvider {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            ModelProvider::Anthropic => "anthropic",
-            ModelProvider::Ollama => "ollama",
-        })
-    }
-}
-
-impl ModelProvider {
-    #[must_use]
-    pub const fn temperature(self) -> Option<f64> {
-        match self {
-            ModelProvider::Ollama => Some(0.0),
-            ModelProvider::Anthropic => None,
-        }
-    }
-}
-
-/// A model in `<provider>:<model>` form, parsed at load: `ollama:qwen3:8b`
-/// is Ollama's `qwen3:8b` (split at the first colon). Parsing is the only
-/// constructor.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct ModelSpec {
-    pub(crate) provider: ModelProvider,
-    pub(crate) model: String,
-}
-
-impl ModelSpec {
-    #[must_use]
-    pub const fn provider(&self) -> ModelProvider {
-        self.provider
-    }
-}
-
-/// An error from parsing a [`ModelSpec`]. The offending key is left to the
-/// config layer, which appends it: the type backs more than one table.
-#[derive(Debug, thiserror::Error)]
-pub enum ModelSpecError {
-    #[error(
-        "model must be \"<provider>:<model>\" (e.g. \"ollama:qwen3:8b\"); \
-         got {got:?}; supported providers: anthropic, ollama"
-    )]
-    BadFormat { got: String },
-    #[error("model names unknown provider {provider:?}; supported providers: anthropic, ollama")]
-    UnknownProvider { provider: String },
-}
-
-impl TryFrom<String> for ModelSpec {
-    type Error = ModelSpecError;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        match value.split_once(':') {
-            Some((provider, model)) if !model.is_empty() => match provider {
-                "anthropic" => Ok(ModelSpec {
-                    provider: ModelProvider::Anthropic,
-                    model: model.to_owned(),
-                }),
-                "ollama" => Ok(ModelSpec {
-                    provider: ModelProvider::Ollama,
-                    model: model.to_owned(),
-                }),
-                unknown => Err(ModelSpecError::UnknownProvider {
-                    provider: unknown.to_owned(),
-                }),
-            },
-            _ => Err(ModelSpecError::BadFormat { got: value }),
-        }
-    }
-}
-
-impl std::str::FromStr for ModelSpec {
-    type Err = ModelSpecError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        ModelSpec::try_from(value.to_owned())
-    }
-}
-
-impl From<ModelSpec> for String {
-    fn from(spec: ModelSpec) -> Self {
-        spec.to_string()
-    }
-}
-
-impl fmt::Display for ModelSpec {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}", self.provider, self.model)
     }
 }
 
@@ -290,8 +197,7 @@ pub enum ConfigError {
     Invalid(Box<config::ConfigError>),
 }
 
-/// Loads config: embedded defaults, then `config.toml` under `home`, then
-/// `ONCALL_*` env vars. Later layers win.
+/// Loads embedded defaults followed by `config.toml` under `home`.
 ///
 /// # Errors
 ///
@@ -299,19 +205,6 @@ pub enum ConfigError {
 /// (degenerate `[triage]`, `[incidents]` or `[investigation]` values, a bad
 /// `model` form, a missing `investigation.repo_root`, an unknown `[webhook]` key).
 pub fn load(home: &Path) -> Result<(Config, ConfigSource), ConfigError> {
-    load_with_env(
-        home,
-        Environment::with_prefix("ONCALL")
-            .prefix_separator("_")
-            .separator("__")
-            .try_parsing(true),
-    )
-}
-
-fn load_with_env(
-    home: &Path,
-    env: impl Source + Send + Sync + 'static,
-) -> Result<(Config, ConfigSource), ConfigError> {
     let path = home.join("config.toml");
     let mut builder =
         config::Config::builder().add_source(File::from_str(DEFAULT_CONFIG, FileFormat::Toml));
@@ -324,7 +217,6 @@ fn load_with_env(
     };
 
     let config: Config = builder
-        .add_source(env)
         .build()
         .and_then(config::Config::try_deserialize)
         .map_err(|e| match &source {
@@ -347,8 +239,11 @@ fn validate(config: &Config) -> Result<(), config::ConfigError> {
             "triage.backoff_max_ms must be at least triage.backoff_initial_ms".to_owned(),
         ));
     }
-    validate_endpoint("triage.endpoint", &config.triage.endpoint)?;
-    validate_endpoint("investigation.endpoint", &config.investigation.endpoint)?;
+    validate_temperature("triage.temperature", config.triage.temperature)?;
+    validate_temperature(
+        "investigation.temperature",
+        config.investigation.temperature,
+    )?;
     if config.investigation.max_turns.get() < 2 {
         return Err(config::ConfigError::Message(
             "investigation.max_turns must be at least 2: the initial model call counts \
@@ -360,25 +255,14 @@ fn validate(config: &Config) -> Result<(), config::ConfigError> {
     validate_repo_root(&config.investigation.repo_root)
 }
 
-/// A malformed endpoint would otherwise surface as Transport-class errors
-/// retried forever, stalling intake behind a boot-time typo.
-fn validate_endpoint(key: &str, endpoint: &str) -> Result<(), config::ConfigError> {
-    let invalid = |reason: &str| {
-        config::ConfigError::Message(format!(
-            "{key} must be an absolute http(s) URL \
-             (e.g. \"http://localhost:11434\"); {reason}: {endpoint:?}"
-        ))
-    };
-    let uri: http::Uri = endpoint
-        .parse()
-        .map_err(|error| invalid(&format!("cannot parse ({error})")))?;
-    if !matches!(uri.scheme_str(), Some("http" | "https")) {
-        return Err(invalid("missing http/https scheme"));
+fn validate_temperature(key: &str, temperature: Option<f64>) -> Result<(), config::ConfigError> {
+    if temperature.is_some_and(|temperature| !temperature.is_finite()) {
+        Err(config::ConfigError::Message(format!(
+            "{key} must be a finite number"
+        )))
+    } else {
+        Ok(())
     }
-    if uri.host().is_none() {
-        return Err(invalid("missing host"));
-    }
-    Ok(())
 }
 
 /// A typo would otherwise surface as every tool call failing mid-run, after
@@ -412,12 +296,8 @@ mod tests {
         home
     }
 
-    fn no_env() -> impl Source + Send + Sync + 'static {
-        File::from_str("", FileFormat::Toml)
-    }
-
     #[test]
-    fn env_override_wins() {
+    fn explicit_home_override_wins() {
         let (home, source) = resolve_home(Some(PathBuf::from("/custom/home"))).unwrap();
         assert_eq!(home, PathBuf::from("/custom/home"));
         assert_eq!(source, HomeSource::EnvVar);
@@ -456,14 +336,14 @@ mod tests {
     #[test]
     fn default_config_has_triage_defaults() {
         let home = home_with(None);
-        let (config, _) = load_with_env(home.path(), no_env()).expect("defaults load");
+        let (config, _) = load(home.path()).expect("defaults load");
         insta::assert_yaml_snapshot!(config.triage);
     }
 
     #[test]
     fn invalid_bind_addr_fails_loud_with_path() {
         let home = home_with(Some("[webhook]\nbind = \"not-an-address\""));
-        let err = load_with_env(home.path(), no_env()).expect_err("must fail");
+        let err = load(home.path()).expect_err("must fail");
         assert!(matches!(err, ConfigError::File { .. }));
         assert!(
             err.to_string().contains("config.toml"),
@@ -474,7 +354,7 @@ mod tests {
     #[test]
     fn zero_queue_capacity_fails_loud_with_key() {
         let home = home_with(Some("[triage]\nqueue_capacity = 0"));
-        let err = load_with_env(home.path(), no_env()).expect_err("must fail");
+        let err = load(home.path()).expect_err("must fail");
         assert!(matches!(err, ConfigError::File { .. }));
         assert!(
             err.to_string().contains("triage.queue_capacity"),
@@ -485,7 +365,7 @@ mod tests {
     #[test]
     fn zero_timeout_secs_fails_loud_with_key() {
         let home = home_with(Some("[triage]\ntimeout_secs = 0"));
-        let err = load_with_env(home.path(), no_env()).expect_err("must fail");
+        let err = load(home.path()).expect_err("must fail");
         assert!(matches!(err, ConfigError::File { .. }));
         assert!(
             err.to_string().contains("triage.timeout_secs"),
@@ -496,7 +376,7 @@ mod tests {
     #[test]
     fn zero_backoff_initial_ms_fails_loud_with_key() {
         let home = home_with(Some("[triage]\nbackoff_initial_ms = 0"));
-        let err = load_with_env(home.path(), no_env()).expect_err("must fail");
+        let err = load(home.path()).expect_err("must fail");
         assert!(matches!(err, ConfigError::File { .. }));
         assert!(
             err.to_string().contains("triage.backoff_initial_ms"),
@@ -509,7 +389,7 @@ mod tests {
         let home = home_with(Some(
             "[triage]\nbackoff_initial_ms = 100\nbackoff_max_ms = 50",
         ));
-        let err = load_with_env(home.path(), no_env()).expect_err("must fail");
+        let err = load(home.path()).expect_err("must fail");
         assert!(matches!(err, ConfigError::Invalid(_)));
         let message = err.to_string();
         assert!(
@@ -519,35 +399,30 @@ mod tests {
         );
     }
 
-    /// Without a scheme every triage call would fail Transport-class and
-    /// retry forever; the typo must die at load instead.
     #[test]
-    fn endpoint_without_scheme_fails_loud_with_key() {
+    fn legacy_triage_endpoint_is_rejected() {
         let home = home_with(Some("[triage]\nendpoint = \"localhost:11434\""));
-        let err = load_with_env(home.path(), no_env()).expect_err("must fail");
-        assert!(matches!(err, ConfigError::Invalid(_)));
+        let err = load(home.path()).expect_err("must fail");
+        assert!(matches!(err, ConfigError::File { .. }));
+        let message = err.to_string();
         assert!(
-            err.to_string().contains("triage.endpoint"),
+            message.contains("endpoint") && message.contains("triage"),
             "error must name the key: {err}"
         );
     }
 
     #[test]
-    fn unparseable_endpoint_fails_loud_with_key() {
-        let home = home_with(Some("[triage]\nendpoint = \" http://localhost:11434\""));
-        let err = load_with_env(home.path(), no_env()).expect_err("must fail");
-        assert!(matches!(err, ConfigError::Invalid(_)));
-        assert!(
-            err.to_string().contains("triage.endpoint"),
-            "error must name the key: {err}"
-        );
+    fn stage_temperature_is_loaded_without_provider_policy() {
+        let home = home_with(Some("[triage]\ntemperature = 0.25"));
+        let (config, _) = load(home.path()).expect("temperature loads");
+        assert_eq!(config.triage.temperature, Some(0.25));
     }
 
     #[test]
     fn model_without_provider_fails_loud() {
         // The pre-provider format: "qwen3:8b" now reads as provider "qwen3".
         let home = home_with(Some("[triage]\nmodel = \"qwen3:8b\""));
-        let err = load_with_env(home.path(), no_env()).expect_err("must fail");
+        let err = load(home.path()).expect_err("must fail");
         assert!(matches!(err, ConfigError::File { .. }));
         let message = err.to_string();
         assert!(
@@ -558,12 +433,12 @@ mod tests {
 
     #[test]
     fn unknown_provider_fails_loud_naming_it() {
-        let home = home_with(Some("[triage]\nmodel = \"openai:gpt-5.5\""));
-        let err = load_with_env(home.path(), no_env()).expect_err("must fail");
+        let home = home_with(Some("[triage]\nmodel = \"voyageai:voyage-3\""));
+        let err = load(home.path()).expect_err("must fail");
         assert!(matches!(err, ConfigError::File { .. }));
         let message = err.to_string();
         assert!(
-            message.contains("openai") && message.contains("ollama"),
+            message.contains("voyageai") && message.contains("ollama"),
             "error must name the unknown provider and the supported ones: {err}"
         );
     }
@@ -571,7 +446,7 @@ mod tests {
     #[test]
     fn empty_model_after_provider_fails_loud() {
         let home = home_with(Some("[triage]\nmodel = \"ollama:\""));
-        let err = load_with_env(home.path(), no_env()).expect_err("must fail");
+        let err = load(home.path()).expect_err("must fail");
         assert!(matches!(err, ConfigError::File { .. }));
         assert!(
             err.to_string().contains("triage.model"),
@@ -584,7 +459,7 @@ mod tests {
         let home = home_with(Some(
             "[triage]\nbackoff_initial_ms = 100\nbackoff_max_ms = 200",
         ));
-        let (config, _) = load_with_env(home.path(), no_env()).expect("valid config loads");
+        let (config, _) = load(home.path()).expect("valid config loads");
         let backoff = config.triage.backoff();
         assert_eq!(backoff.initial, std::time::Duration::from_millis(100));
         assert_eq!(backoff.max, std::time::Duration::from_millis(200));
@@ -606,28 +481,36 @@ mod tests {
     }
 
     #[test]
-    fn sampling_policy_is_per_provider() {
-        assert_eq!(ModelProvider::Anthropic.temperature(), None);
-        assert_eq!(ModelProvider::Ollama.temperature(), Some(0.0));
+    fn provider_model_splits_on_first_colon() {
+        let home = home_with(Some("[triage]\nmodel = \"ollama:qwen3:8b\""));
+        let (config, _) = load(home.path()).expect("valid model loads");
+        assert_eq!(config.triage.model.provider().as_str(), "ollama");
+        assert_eq!(config.triage.model.model().as_str(), "qwen3:8b");
     }
 
     #[test]
-    fn provider_model_splits_on_first_colon() {
-        let home = home_with(Some("[triage]\nmodel = \"ollama:qwen3:8b\""));
-        let (config, _) = load_with_env(home.path(), no_env()).expect("valid model loads");
-        assert_eq!(
-            config.triage.model,
-            ModelSpec {
-                provider: ModelProvider::Ollama,
-                model: "qwen3:8b".to_owned(),
-            }
-        );
+    fn provider_blocks_are_strict_and_registry_backed() {
+        let home = home_with(Some(
+            "[providers.openai]\napi_key = { value = \"test-key\" }\nbase_url = \"https://example.com/v1\"",
+        ));
+        load(home.path()).expect("registered provider block loads");
+
+        let home = home_with(Some("[providers.voyageai]\napi_key = { value = \"test\" }"));
+        let error = load(home.path()).expect_err("unknown block must fail");
+        assert!(error.to_string().contains("voyageai"), "{error}");
+    }
+
+    #[test]
+    fn non_finite_stage_temperature_fails_loud() {
+        let home = home_with(Some("[triage]\ntemperature = nan"));
+        let error = load(home.path()).expect_err("NaN must fail");
+        assert!(error.to_string().contains("triage.temperature"), "{error}");
     }
 
     #[test]
     fn unknown_source_fails_loud_naming_the_supported_ones() {
         let home = home_with(Some("[webhook.datadog]"));
-        let err = load_with_env(home.path(), no_env()).expect_err("must fail");
+        let err = load(home.path()).expect_err("must fail");
         assert!(matches!(err, ConfigError::File { .. }));
         let message = err.to_string();
         assert!(
@@ -640,7 +523,7 @@ mod tests {
     #[test]
     fn enabling_one_source_keeps_the_rest_disabled() {
         let home = home_with(Some("[webhook.grafana]\nenabled = true"));
-        let (config, _) = load_with_env(home.path(), no_env()).expect("subset loads");
+        let (config, _) = load(home.path()).expect("subset loads");
         assert!(
             config.webhook.grafana.enabled,
             "grafana is enabled by the file"
@@ -655,7 +538,7 @@ mod tests {
     #[test]
     fn bare_source_table_stays_disabled() {
         let home = home_with(Some("[webhook.grafana]"));
-        let (config, _) = load_with_env(home.path(), no_env()).expect("bare table loads");
+        let (config, _) = load(home.path()).expect("bare table loads");
         assert!(!config.webhook.grafana.enabled);
     }
 
@@ -664,7 +547,7 @@ mod tests {
     #[test]
     fn unknown_per_source_key_fails_loud() {
         let home = home_with(Some("[webhook.grafana]\nsecret = \"hunter2\""));
-        let err = load_with_env(home.path(), no_env()).expect_err("must fail");
+        let err = load(home.path()).expect_err("must fail");
         assert!(matches!(err, ConfigError::File { .. }));
         assert!(
             err.to_string().contains("secret"),
@@ -676,7 +559,7 @@ mod tests {
     #[test]
     fn unknown_triage_key_fails_loud() {
         let home = home_with(Some("[triage]\nbackoff_maximum_ms = 500"));
-        let err = load_with_env(home.path(), no_env()).expect_err("must fail");
+        let err = load(home.path()).expect_err("must fail");
         assert!(matches!(err, ConfigError::File { .. }));
         assert!(
             err.to_string().contains("backoff_maximum_ms"),
@@ -687,14 +570,14 @@ mod tests {
     #[test]
     fn default_config_has_incident_defaults() {
         let home = home_with(None);
-        let (config, _) = load_with_env(home.path(), no_env()).expect("defaults load");
+        let (config, _) = load(home.path()).expect("defaults load");
         insta::assert_yaml_snapshot!(config.incidents);
     }
 
     #[test]
     fn zero_incident_queue_capacity_fails_loud_with_key() {
         let home = home_with(Some("[incidents]\nqueue_capacity = 0"));
-        let err = load_with_env(home.path(), no_env()).expect_err("must fail");
+        let err = load(home.path()).expect_err("must fail");
         assert!(matches!(err, ConfigError::File { .. }));
         assert!(
             err.to_string().contains("incidents.queue_capacity"),
@@ -705,7 +588,7 @@ mod tests {
     #[test]
     fn zero_idle_ttl_fails_loud_with_key() {
         let home = home_with(Some("[incidents]\nidle_ttl_secs = 0"));
-        let err = load_with_env(home.path(), no_env()).expect_err("must fail");
+        let err = load(home.path()).expect_err("must fail");
         assert!(matches!(err, ConfigError::File { .. }));
         assert!(
             err.to_string().contains("incidents.idle_ttl_secs"),
@@ -716,7 +599,7 @@ mod tests {
     #[test]
     fn unknown_incidents_key_fails_loud() {
         let home = home_with(Some("[incidents]\nidle_ttl = 60"));
-        let err = load_with_env(home.path(), no_env()).expect_err("must fail");
+        let err = load(home.path()).expect_err("must fail");
         assert!(matches!(err, ConfigError::File { .. }));
         assert!(
             err.to_string().contains("idle_ttl"),
@@ -727,21 +610,21 @@ mod tests {
     #[test]
     fn idle_ttl_maps_to_a_duration() {
         let home = home_with(Some("[incidents]\nidle_ttl_secs = 60"));
-        let (config, _) = load_with_env(home.path(), no_env()).expect("valid config loads");
+        let (config, _) = load(home.path()).expect("valid config loads");
         assert_eq!(config.incidents.idle_ttl(), chrono::TimeDelta::seconds(60));
     }
 
     #[test]
     fn default_config_has_investigation_defaults() {
         let home = home_with(None);
-        let (config, _) = load_with_env(home.path(), no_env()).expect("defaults load");
+        let (config, _) = load(home.path()).expect("defaults load");
         insta::assert_yaml_snapshot!(config.investigation);
     }
 
     #[test]
     fn zero_investigation_queue_capacity_fails_loud_with_key() {
         let home = home_with(Some("[investigation]\nqueue_capacity = 0"));
-        let err = load_with_env(home.path(), no_env()).expect_err("must fail");
+        let err = load(home.path()).expect_err("must fail");
         assert!(matches!(err, ConfigError::File { .. }));
         assert!(
             err.to_string().contains("investigation.queue_capacity"),
@@ -752,7 +635,7 @@ mod tests {
     #[test]
     fn zero_investigation_timeout_secs_fails_loud_with_key() {
         let home = home_with(Some("[investigation]\ntimeout_secs = 0"));
-        let err = load_with_env(home.path(), no_env()).expect_err("must fail");
+        let err = load(home.path()).expect_err("must fail");
         assert!(matches!(err, ConfigError::File { .. }));
         assert!(
             err.to_string().contains("investigation.timeout_secs"),
@@ -763,7 +646,7 @@ mod tests {
     #[test]
     fn zero_max_turns_fails_loud_with_key() {
         let home = home_with(Some("[investigation]\nmax_turns = 0"));
-        let err = load_with_env(home.path(), no_env()).expect_err("must fail");
+        let err = load(home.path()).expect_err("must fail");
         assert!(matches!(err, ConfigError::File { .. }));
         assert!(
             err.to_string().contains("investigation.max_turns"),
@@ -774,7 +657,7 @@ mod tests {
     #[test]
     fn zero_max_file_bytes_fails_loud_with_key() {
         let home = home_with(Some("[investigation]\nmax_file_bytes = 0"));
-        let err = load_with_env(home.path(), no_env()).expect_err("must fail");
+        let err = load(home.path()).expect_err("must fail");
         assert!(matches!(err, ConfigError::File { .. }));
         assert!(
             err.to_string().contains("investigation.max_file_bytes"),
@@ -787,7 +670,7 @@ mod tests {
     #[test]
     fn one_max_turn_fails_loud_explaining_the_initial_call() {
         let home = home_with(Some("[investigation]\nmax_turns = 1"));
-        let err = load_with_env(home.path(), no_env()).expect_err("must fail");
+        let err = load(home.path()).expect_err("must fail");
         assert!(matches!(err, ConfigError::Invalid(_)));
         let message = err.to_string();
         assert!(
@@ -806,7 +689,7 @@ mod tests {
         let missing = elsewhere.path().join("no-such-repo");
         let literal = format!("{:?}", missing.display().to_string());
         let home = home_with(Some(&format!("[investigation]\nrepo_root = {literal}")));
-        let err = load_with_env(home.path(), no_env()).expect_err("must fail");
+        let err = load(home.path()).expect_err("must fail");
         assert!(matches!(err, ConfigError::Invalid(_)));
         let message = err.to_string();
         assert!(
@@ -822,7 +705,7 @@ mod tests {
         std::fs::write(&file, "a file, not a directory").expect("write file");
         let literal = format!("{:?}", file.display().to_string());
         let home = home_with(Some(&format!("[investigation]\nrepo_root = {literal}")));
-        let err = load_with_env(home.path(), no_env()).expect_err("must fail");
+        let err = load(home.path()).expect_err("must fail");
         assert!(matches!(err, ConfigError::Invalid(_)));
         assert!(
             err.to_string().contains("investigation.repo_root"),
@@ -833,7 +716,7 @@ mod tests {
     #[test]
     fn unknown_investigation_key_fails_loud() {
         let home = home_with(Some("[investigation]\nmax_tokens = 500"));
-        let err = load_with_env(home.path(), no_env()).expect_err("must fail");
+        let err = load(home.path()).expect_err("must fail");
         assert!(matches!(err, ConfigError::File { .. }));
         assert!(
             err.to_string().contains("max_tokens"),
@@ -842,12 +725,13 @@ mod tests {
     }
 
     #[test]
-    fn investigation_endpoint_without_scheme_fails_loud_with_key() {
+    fn legacy_investigation_endpoint_is_rejected() {
         let home = home_with(Some("[investigation]\nendpoint = \"localhost:11434\""));
-        let err = load_with_env(home.path(), no_env()).expect_err("must fail");
-        assert!(matches!(err, ConfigError::Invalid(_)));
+        let err = load(home.path()).expect_err("must fail");
+        assert!(matches!(err, ConfigError::File { .. }));
+        let message = err.to_string();
         assert!(
-            err.to_string().contains("investigation.endpoint"),
+            message.contains("endpoint") && message.contains("investigation"),
             "error must name the key: {err}"
         );
     }
@@ -856,8 +740,8 @@ mod tests {
     /// wrong table.
     #[test]
     fn bad_investigation_model_names_the_investigation_key() {
-        let home = home_with(Some("[investigation]\nmodel = \"openai:gpt-5.5\""));
-        let err = load_with_env(home.path(), no_env()).expect_err("must fail");
+        let home = home_with(Some("[investigation]\nmodel = \"voyageai:voyage-3\""));
+        let err = load(home.path()).expect_err("must fail");
         assert!(matches!(err, ConfigError::File { .. }));
         let message = err.to_string();
         assert!(
@@ -869,7 +753,7 @@ mod tests {
     #[test]
     fn investigation_timeout_maps_to_a_duration() {
         let home = home_with(Some("[investigation]\ntimeout_secs = 90"));
-        let (config, _) = load_with_env(home.path(), no_env()).expect("valid config loads");
+        let (config, _) = load(home.path()).expect("valid config loads");
         assert_eq!(
             config.investigation.timeout(),
             std::time::Duration::from_secs(90)
@@ -879,7 +763,7 @@ mod tests {
     #[test]
     fn unknown_log_key_fails_loud() {
         let home = home_with(Some("[log]\nfromat = \"json\""));
-        let err = load_with_env(home.path(), no_env()).expect_err("must fail");
+        let err = load(home.path()).expect_err("must fail");
         assert!(matches!(err, ConfigError::File { .. }));
         assert!(
             err.to_string().contains("fromat"),
@@ -887,19 +771,17 @@ mod tests {
         );
     }
 
-    /// `ONCALL_HOME` reaches the merged map as a top-level `home` key, so
-    /// the top level must stay lenient or every boot that sets it fails.
     #[test]
-    fn top_level_home_key_is_tolerated() {
-        let home = home_with(None);
-        let env = File::from_str("home = \"/somewhere\"", FileFormat::Toml);
-        load_with_env(home.path(), env).expect("top-level home key must not fail the load");
+    fn unknown_top_level_key_fails_loud() {
+        let home = home_with(Some("home = \"/somewhere\""));
+        let error = load(home.path()).expect_err("unknown top-level key must fail");
+        assert!(error.to_string().contains("home"), "{error}");
     }
 
     #[test]
     fn missing_file_falls_back_to_embedded() {
         let home = home_with(None);
-        let (config, source) = load_with_env(home.path(), no_env()).expect("load");
+        let (config, source) = load(home.path()).expect("load");
         assert_eq!(source, ConfigSource::Embedded);
         assert_eq!(config.log.level, "info");
     }
@@ -907,7 +789,7 @@ mod tests {
     #[test]
     fn file_overrides_embedded() {
         let home = home_with(Some("[log]\nlevel = \"debug\""));
-        let (config, source) = load_with_env(home.path(), no_env()).expect("load");
+        let (config, source) = load(home.path()).expect("load");
         assert!(matches!(source, ConfigSource::File(_)));
         assert_eq!(config.log.level, "debug");
         // Keys absent from the file keep embedded values:
@@ -915,33 +797,13 @@ mod tests {
     }
 
     #[test]
-    fn env_layer_overrides_file_overrides_embedded() {
-        let home = home_with(Some("[log]\nlevel = \"debug\""));
-        let env = File::from_str("[log]\nlevel = \"trace\"", FileFormat::Toml);
-        let (config, _) = load_with_env(home.path(), env).expect("load");
-        assert_eq!(config.log.level, "trace");
-    }
-
-    #[test]
     fn malformed_file_fails_loud_with_path() {
         let home = home_with(Some("[log\nlevel = "));
-        let err = load_with_env(home.path(), no_env()).expect_err("must fail");
+        let err = load(home.path()).expect_err("must fail");
         assert!(matches!(err, ConfigError::File { .. }));
         assert!(
             err.to_string().contains("config.toml"),
             "error must name the file: {err}"
-        );
-    }
-
-    #[test]
-    fn env_caused_validation_error_is_not_blamed_on_file() {
-        let home = home_with(Some("[log]\nlevel = \"debug\""));
-        let env = File::from_str("[triage]\nbackoff_max_ms = 50", FileFormat::Toml);
-        let err = load_with_env(home.path(), env).expect_err("must fail");
-        assert!(matches!(err, ConfigError::Invalid(_)));
-        assert!(
-            !err.to_string().contains("config.toml"),
-            "error must not name the file: {err}"
         );
     }
 }

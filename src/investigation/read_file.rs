@@ -207,18 +207,17 @@ impl Tool for ReadFile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{InvestigationConfig, ModelProvider, ModelSpec};
+    use crate::config::{InvestigationConfig, ModelSpec};
     use std::num::{NonZeroU64, NonZeroUsize};
     use std::path::PathBuf;
     use tempfile::TempDir;
 
     fn test_config(repo_root: &std::path::Path, max_file_bytes: usize) -> InvestigationConfig {
         InvestigationConfig {
-            model: ModelSpec {
-                provider: ModelProvider::Ollama,
-                model: "test-model".to_owned(),
-            },
-            endpoint: "http://127.0.0.1:11434".to_owned(),
+            model: "ollama:test-model"
+                .parse::<ModelSpec>()
+                .expect("valid spec"),
+            temperature: None,
             repo_root: repo_root.to_path_buf(),
             max_turns: NonZeroUsize::new(8).expect("nonzero"),
             timeout_secs: NonZeroU64::new(5).expect("nonzero"),

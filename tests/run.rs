@@ -5,15 +5,19 @@ mod common {
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStringExt;
+#[cfg(unix)]
+use std::process::Command;
 
 use common::harness::{
     assert_clean_exit, post, read_until_contains, read_until_ready, ready_addr, send_sigterm,
-    sigterm_and_assert_clean_exit, spawn_agent,
+    sigterm_and_assert_clean_exit, spawn_agent_with_config,
 };
 
 #[test]
 fn runs_until_sigterm_then_exits_cleanly() {
-    let (child, mut stdout, watchdog) = spawn_agent(&[]);
+    let (child, mut stdout, watchdog) = spawn_agent_with_config("", &[]);
     let lines = read_until_ready(&mut stdout);
     assert!(
         lines
@@ -26,21 +30,28 @@ fn runs_until_sigterm_then_exits_cleanly() {
 }
 
 #[test]
-fn oncall_env_vars_set_home_and_log_format() {
+fn oncall_home_selects_config_but_other_oncall_env_vars_do_not_override_it() {
     let home = tempfile::tempdir().expect("create tempdir");
     let home_str = home.path().to_str().expect("utf-8 tempdir path");
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[log]\nformat = \"pretty\"\n",
+    )
+    .expect("write config");
 
-    let (child, mut stdout, watchdog) =
-        spawn_agent(&[("ONCALL_HOME", home_str), ("ONCALL_LOG__FORMAT", "json")]);
+    let (child, mut stdout, watchdog) = spawn_agent_with_config(
+        "",
+        &[("ONCALL_HOME", home_str), ("ONCALL_LOG__FORMAT", "json")],
+    );
     let lines = read_until_ready(&mut stdout);
 
     let first = lines.first().expect("at least one log line");
     assert!(
-        first.starts_with('{'),
-        "expected JSON log output, got: {first}"
+        !first.starts_with('{'),
+        "ONCALL_LOG__FORMAT must not override config.toml, got: {first}"
     );
     assert!(
-        first.contains("\"source\":\"ONCALL_HOME\"") && first.contains(home_str),
+        first.contains("ONCALL_HOME") && first.contains(home_str),
         "expected home resolved from ONCALL_HOME to {home_str}, got: {first}"
     );
 
@@ -49,10 +60,10 @@ fn oncall_env_vars_set_home_and_log_format() {
 
 #[test]
 fn webhook_roundtrip_returns_202_and_logs_alerts() {
-    let (child, mut stdout, watchdog) = spawn_agent(&[
-        ("ONCALL_LOG__FORMAT", "json"),
-        ("ONCALL_WEBHOOK__GRAFANA__ENABLED", "true"),
-    ]);
+    let (child, mut stdout, watchdog) = spawn_agent_with_config(
+        "[log]\nformat = \"json\"\n[webhook.grafana]\nenabled = true\n",
+        &[],
+    );
     let addr = ready_addr(&read_until_ready(&mut stdout));
 
     let body = include_str!("../fixtures/grafana/firing_single.json");
@@ -84,10 +95,10 @@ fn webhook_roundtrip_returns_202_and_logs_alerts() {
 
 #[test]
 fn only_opted_in_sources_are_served() {
-    let (child, mut stdout, watchdog) = spawn_agent(&[
-        ("ONCALL_LOG__FORMAT", "json"),
-        ("ONCALL_WEBHOOK__GRAFANA__ENABLED", "true"),
-    ]);
+    let (child, mut stdout, watchdog) = spawn_agent_with_config(
+        "[log]\nformat = \"json\"\n[webhook.grafana]\nenabled = true\n",
+        &[],
+    );
     let addr = ready_addr(&read_until_ready(&mut stdout));
 
     let unconfigured = post(
@@ -115,7 +126,7 @@ fn only_opted_in_sources_are_served() {
 
 #[test]
 fn triage_worker_readiness_line_appears_before_running_line() {
-    let (child, mut stdout, watchdog) = spawn_agent(&[("ONCALL_LOG__FORMAT", "json")]);
+    let (child, mut stdout, watchdog) = spawn_agent_with_config("[log]\nformat = \"json\"\n", &[]);
     let lines = read_until_ready(&mut stdout);
 
     let started = lines
@@ -128,8 +139,8 @@ fn triage_worker_readiness_line_appears_before_running_line() {
     );
     let started = started.expect("checked by assert above");
     assert!(
-        started.contains(r#""model":""#) && started.contains(r#""endpoint":""#),
-        "worker readiness line must carry model and endpoint: {started}"
+        started.contains(r#""model":""#) && !started.contains(r#""endpoint":""#),
+        "worker readiness line must carry only the selected model: {started}"
     );
 
     send_sigterm(&child);
@@ -144,7 +155,7 @@ fn triage_worker_readiness_line_appears_before_running_line() {
 
 #[test]
 fn investigation_worker_readiness_line_appears_before_running_line() {
-    let (child, mut stdout, watchdog) = spawn_agent(&[("ONCALL_LOG__FORMAT", "json")]);
+    let (child, mut stdout, watchdog) = spawn_agent_with_config("[log]\nformat = \"json\"\n", &[]);
     let lines = read_until_ready(&mut stdout);
 
     let started = lines
@@ -174,10 +185,10 @@ fn investigation_worker_readiness_line_appears_before_running_line() {
 /// anything claims to be running.
 #[test]
 fn anthropic_investigation_without_a_key_fails_before_the_readiness_line() {
-    let (mut child, mut stdout, watchdog) = spawn_agent(&[
-        ("ONCALL_LOG__FORMAT", "json"),
-        ("ONCALL_INVESTIGATION__MODEL", "anthropic:claude-sonnet-5"),
-    ]);
+    let (mut child, mut stdout, watchdog) = spawn_agent_with_config(
+        "[log]\nformat = \"json\"\n[investigation]\nmodel = \"anthropic:claude-sonnet-5\"\n",
+        &[],
+    );
 
     let mut logs = String::new();
     stdout
@@ -195,12 +206,67 @@ fn anthropic_investigation_without_a_key_fails_before_the_readiness_line() {
     watchdog.disarm();
 }
 
+#[cfg(unix)]
+#[test]
+fn non_unicode_provider_environment_value_is_redacted() {
+    let home = tempfile::tempdir().expect("create tempdir");
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[triage]\nmodel = \"openai:test-model\"\n",
+    )
+    .expect("write config");
+
+    let marker = "credential-marker";
+    let mut invalid_value = marker.as_bytes().to_vec();
+    invalid_value.push(0xff);
+    let output = Command::new(env!("CARGO_BIN_EXE_oncall-ai"))
+        .env("ONCALL_HOME", home.path())
+        .env(
+            "OPENAI_API_KEY",
+            std::ffi::OsString::from_vec(invalid_value),
+        )
+        .output()
+        .expect("run binary");
+
+    assert!(
+        !output.status.success(),
+        "invalid Unicode must fail startup"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("OPENAI_API_KEY"),
+        "error must name the invalid variable"
+    );
+    assert!(
+        !stderr.contains(marker),
+        "error must not expose any part of the invalid credential"
+    );
+}
+
+#[test]
+fn invalid_provider_config_fails_before_the_readiness_line() {
+    let (mut child, mut stdout, watchdog) =
+        spawn_agent_with_config("[providers.ollama]\nbase_url = \"localhost:11434\"\n", &[]);
+
+    let mut logs = String::new();
+    stdout
+        .read_to_string(&mut logs)
+        .expect("read stdout to EOF");
+    assert!(
+        !logs.contains("running; ctrl-C to stop"),
+        "invalid provider URL must fail before readiness, got:\n{logs}"
+    );
+    let status = child.wait().expect("wait for exit");
+    assert!(!status.success(), "invalid provider URL must fail startup");
+    watchdog.disarm();
+}
+
 #[test]
 fn inflight_request_drains_through_shutdown() {
-    let (child, mut stdout, watchdog) = spawn_agent(&[
-        ("ONCALL_LOG__FORMAT", "json"),
-        ("ONCALL_WEBHOOK__GRAFANA__ENABLED", "true"),
-    ]);
+    let (child, mut stdout, watchdog) = spawn_agent_with_config(
+        "[log]\nformat = \"json\"\n[webhook.grafana]\nenabled = true\n",
+        &[],
+    );
     let addr = ready_addr(&read_until_ready(&mut stdout));
 
     let body = r#"{"alerts":[]}"#;

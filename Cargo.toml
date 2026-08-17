@@ -13,6 +13,7 @@ axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 config = { version = "0.15", default-features = false, features = ["toml"] }
+futures = "0.3"
 http = "1"
 rig-agent = { version = "0.41", default-features = false }
 rig-core = { version = "0.41", default-features = false, features = ["reqwest", "rustls"] }

@@ -8,9 +8,10 @@ use oncall_ai::incident::IncidentId;
 use oncall_ai::investigation::{
     Investigation, InvestigationRequest, Outcome, Step, build_agent, worker,
 };
+use oncall_ai::model::AnyCompletionModel;
 use oncall_ai::triage::{Severity, TriageResult};
 use rig_agent::agent::Agent;
-use rig_core::client::{Nothing, ProviderClient as _};
+use rig_core::client::{CompletionClient as _, Nothing, ProviderClient as _};
 use rig_core::completion::CompletionModel;
 use rig_core::providers::{anthropic, ollama};
 use tokio::sync::mpsc;
@@ -163,10 +164,11 @@ async fn ollama_finds_the_pool_cap() {
     let config = eval_config();
     let client = ollama::Client::builder()
         .api_key(Nothing)
-        .base_url(&config.endpoint)
+        .base_url("http://localhost:11434")
         .build()
         .expect("ollama client builds");
-    let (agent, repo_root) = build_agent(&client, &config).expect("agent builds");
+    let model = AnyCompletionModel::new(client.completion_model(config.model.model().as_str()));
+    let (agent, repo_root) = build_agent(model, &config).expect("agent builds");
     eprintln!("repo_root: {}", repo_root.display());
     let investigated = investigate(agent, config).await;
     assert_found_the_pool_cap(&investigated);
@@ -186,7 +188,8 @@ async fn anthropic_finds_the_pool_cap() {
         ..eval_config()
     };
     let client = anthropic::Client::from_val(api_key).expect("anthropic client builds");
-    let (agent, repo_root) = build_agent(&client, &config).expect("agent builds");
+    let model = AnyCompletionModel::new(client.completion_model(config.model.model().as_str()));
+    let (agent, repo_root) = build_agent(model, &config).expect("agent builds");
     eprintln!("repo_root: {}", repo_root.display());
     let investigated = investigate(agent, config).await;
     assert_found_the_pool_cap(&investigated);

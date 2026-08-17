@@ -4,6 +4,7 @@ pub mod grafana;
 pub mod incident;
 pub mod investigation;
 pub mod log;
+pub mod model;
 pub mod pagerduty;
 pub mod retry;
 mod text;

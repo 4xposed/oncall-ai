@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 mod triager;
 mod worker;
 
-pub use triager::{BuildError, ErrorClass, TriageError, Triager};
+pub use triager::{ErrorClass, TriageError, Triager};
 pub use worker::{Triage, worker};
 
 use crate::incident::IncidentId;

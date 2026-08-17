@@ -4,19 +4,26 @@ mod common {
 }
 
 use common::harness::{
-    post, read_until_ready, ready_addr, sigterm_and_assert_clean_exit, spawn_agent,
+    post, read_until_ready, ready_addr, sigterm_and_assert_clean_exit, spawn_agent_with_config,
 };
 use common::json_log::read_until_field;
 use std::io::BufReader;
 use std::net::SocketAddr;
 use std::process::ChildStdout;
 
-const ENVS: &[(&str, &str)] = &[
-    ("ONCALL_LOG__FORMAT", "json"),
-    ("ONCALL_WEBHOOK__GRAFANA__ENABLED", "true"),
-    ("ONCALL_WEBHOOK__PAGERDUTY__ENABLED", "true"),
-    ("ONCALL_TRIAGE__ENDPOINT", "http://127.0.0.1:9"),
-];
+const CONFIG: &str = r#"
+[log]
+format = "json"
+
+[webhook.grafana]
+enabled = true
+
+[webhook.pagerduty]
+enabled = true
+
+[providers.ollama]
+base_url = "http://127.0.0.1:9"
+"#;
 
 fn post_accepted(addr: SocketAddr, path: &str, body: &str) {
     let response = post(addr, path, body);
@@ -38,7 +45,7 @@ fn str_field<'a>(fields: &'a serde_json::Value, key: &str) -> &'a str {
 
 #[test]
 fn grafana_lifecycle_dedupes_and_closes() {
-    let (child, mut stdout, watchdog) = spawn_agent(ENVS);
+    let (child, mut stdout, watchdog) = spawn_agent_with_config(CONFIG, &[]);
     let addr = ready_addr(&read_until_ready(&mut stdout));
     let firing = include_str!("../fixtures/grafana/firing_single.json");
 
@@ -73,7 +80,7 @@ fn grafana_lifecycle_dedupes_and_closes() {
 
 #[test]
 fn pagerduty_siblings_share_an_incident() {
-    let (child, mut stdout, watchdog) = spawn_agent(ENVS);
+    let (child, mut stdout, watchdog) = spawn_agent_with_config(CONFIG, &[]);
     let addr = ready_addr(&read_until_ready(&mut stdout));
 
     post_accepted(

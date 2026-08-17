@@ -3,7 +3,7 @@ source: src/config.rs
 expression: config.investigation
 ---
 model: "ollama:qwen3.5:27b"
-endpoint: "http://localhost:11434"
+temperature: ~
 repo_root: "."
 max_turns: 12
 timeout_secs: 300

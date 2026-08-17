@@ -1,41 +1,26 @@
 use super::{TRIAGE_PREAMBLE, TriageResult, render_prompt};
-use crate::config::{ModelProvider, TriageConfig};
-use rig_core::client::{CompletionClient, Nothing};
+use crate::config::TriageConfig;
+use crate::model::AnyCompletionModel;
 use rig_core::completion::{AssistantContent, CompletionError, CompletionModel as _};
 use rig_core::http_client;
-use rig_core::providers::ollama;
 use std::time::Duration;
 
 const OUTPUT_SNIPPET_BYTES: usize = 200;
 
 pub struct Triager {
-    model: ollama::CompletionModel,
+    model: AnyCompletionModel,
     timeout: Duration,
+    temperature: Option<f64>,
 }
 
 impl Triager {
-    /// # Errors
-    ///
-    /// Fails on a non-Ollama provider or when the client cannot be built.
-    pub fn new(config: &TriageConfig) -> Result<Self, BuildError> {
-        match config.model.provider {
-            ModelProvider::Ollama => {}
-            provider @ ModelProvider::Anthropic => {
-                return Err(BuildError::UnsupportedProvider { provider });
-            }
-        }
-        let client = ollama::Client::builder()
-            .api_key(Nothing)
-            .base_url(&config.endpoint)
-            .build()
-            .map_err(|source| BuildError::Client {
-                endpoint: config.endpoint.clone(),
-                source,
-            })?;
-        Ok(Self {
-            model: client.completion_model(&config.model.model),
+    #[must_use]
+    pub fn new(model: AnyCompletionModel, config: &TriageConfig) -> Self {
+        Self {
+            model,
             timeout: Duration::from_secs(config.timeout_secs.get()),
-        })
+            temperature: config.temperature,
+        }
     }
 
     /// # Errors
@@ -48,8 +33,7 @@ impl Triager {
             .completion_request(render_prompt(alert))
             .preamble(TRIAGE_PREAMBLE.to_owned())
             .output_schema(schemars::schema_for!(TriageResult))
-            .additional_params(serde_json::json!({ "seed": 42 }))
-            .temperature_opt(ModelProvider::Ollama.temperature())
+            .temperature_opt(self.temperature)
             .send();
         let response = match tokio::time::timeout(self.timeout, call).await {
             Ok(outcome) => outcome?,
@@ -68,18 +52,6 @@ impl Triager {
             source,
         })
     }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum BuildError {
-    #[error("failed to build triage client for endpoint {endpoint}")]
-    Client {
-        endpoint: String,
-        #[source]
-        source: http_client::Error,
-    },
-    #[error("triage.model names provider {provider}; triage supports only ollama")]
-    UnsupportedProvider { provider: ModelProvider },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -131,14 +103,16 @@ fn classify_completion(error: &CompletionError) -> ErrorClass {
 mod tests {
     use super::*;
     use crate::alert::test_alert;
-    use crate::config::{ModelProvider, ModelSpec, TriageConfig};
+    use crate::config::{ModelSpec, TriageConfig};
     use crate::triage::{Severity, TRIAGE_PREAMBLE, render_prompt};
     use axum::Router;
     use axum::extract::State;
     use axum::http::StatusCode;
     use axum::response::{IntoResponse, Response};
     use axum::routing::post;
+    use rig_core::client::{CompletionClient as _, Nothing};
     use rig_core::completion::CompletionError;
+    use rig_core::providers::ollama;
     use std::net::SocketAddr;
     use std::num::{NonZeroU64, NonZeroUsize};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -240,13 +214,12 @@ mod tests {
         }
     }
 
-    fn test_config(addr: SocketAddr) -> TriageConfig {
+    fn test_config() -> TriageConfig {
         TriageConfig {
-            model: ModelSpec {
-                provider: ModelProvider::Ollama,
-                model: "test-model".to_owned(),
-            },
-            endpoint: format!("http://{addr}"),
+            model: "ollama:test-model"
+                .parse::<ModelSpec>()
+                .expect("valid spec"),
+            temperature: Some(0.0),
             queue_capacity: NonZeroUsize::new(8).expect("nonzero"),
             timeout_secs: NonZeroU64::new(5).expect("nonzero"),
             backoff_initial_ms: NonZeroU64::new(1).expect("nonzero"),
@@ -254,27 +227,20 @@ mod tests {
         }
     }
 
-    fn test_triager(addr: SocketAddr) -> Triager {
-        Triager::new(&test_config(addr)).expect("triager builds")
+    fn test_triager_with_temperature(addr: SocketAddr, temperature: Option<f64>) -> Triager {
+        let client = ollama::Client::builder()
+            .api_key(Nothing)
+            .base_url(format!("http://{addr}"))
+            .build()
+            .expect("test Ollama client builds");
+        let model = AnyCompletionModel::new(client.completion_model("test-model"));
+        let mut config = test_config();
+        config.temperature = temperature;
+        Triager::new(model, &config)
     }
 
-    /// Triage is Ollama-only; a non-Ollama spec must die at build, not at
-    /// the first call.
-    #[test]
-    fn unsupported_provider_fails_to_build() {
-        let mut config = test_config("192.0.2.1:1".parse().expect("valid addr"));
-        config.model = ModelSpec {
-            provider: ModelProvider::Anthropic,
-            model: "claude-sonnet-5".to_owned(),
-        };
-        let Err(error) = Triager::new(&config) else {
-            panic!("anthropic must not build");
-        };
-        assert!(matches!(error, BuildError::UnsupportedProvider { .. }));
-        assert!(
-            error.to_string().contains("triage.model") && error.to_string().contains("anthropic"),
-            "error must name the key and the provider, got: {error}"
-        );
+    fn test_triager(addr: SocketAddr) -> Triager {
+        test_triager_with_temperature(addr, Some(0.0))
     }
 
     #[tokio::test]
@@ -330,6 +296,10 @@ mod tests {
             Some(0.0),
             "triage must request deterministic sampling, got: {request}"
         );
+        assert!(
+            request.pointer("/options/seed").is_none(),
+            "triage must not inject Ollama-specific seed parameters: {request}"
+        );
         assert_eq!(
             request
                 .pointer("/messages/0/role")
@@ -347,6 +317,27 @@ mod tests {
                 .pointer("/messages/1/content")
                 .and_then(serde_json::Value::as_str),
             Some(render_prompt(&alert).as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn absent_temperature_leaves_provider_sampling_unset() {
+        let fake = fake_ollama(FakeResponse::Chat(VALID_CONTENT_RESPONSE.to_owned())).await;
+
+        test_triager_with_temperature(fake.addr, None)
+            .triage(&test_alert())
+            .await
+            .expect("triage succeeds");
+
+        let request = fake
+            .seen
+            .lock()
+            .expect("request capture lock")
+            .clone()
+            .expect("fake Ollama saw a request");
+        assert!(
+            request.pointer("/options/temperature").is_none(),
+            "absent stage temperature must defer to the provider: {request}"
         );
     }
 

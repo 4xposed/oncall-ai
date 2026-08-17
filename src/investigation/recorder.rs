@@ -67,28 +67,32 @@ impl Recorder {
 }
 
 impl AgentHook for Recorder {
-    async fn on_model_turn_finished(
+    fn on_model_turn_finished(
         &self,
         _ctx: &HookContext,
         event: ModelTurnFinished<'_>,
-    ) -> ModelTurnAction {
-        self.record_turn(event)
+    ) -> impl std::future::Future<Output = ModelTurnAction> {
+        std::future::ready(self.record_turn(event))
     }
 
-    async fn on_tool_result(
+    fn on_tool_result(
         &self,
         ctx: &HookContext,
         event: ToolResultEvent<'_>,
-    ) -> ToolResultAction {
-        self.record_tool_result(ctx.turn(), &event)
+    ) -> impl std::future::Future<Output = ToolResultAction> {
+        std::future::ready(self.record_tool_result(ctx.turn(), &event))
     }
 
-    async fn on_invalid_tool_call(
+    fn on_invalid_tool_call(
         &self,
         ctx: &HookContext,
         event: &InvalidToolCallContext,
-    ) -> Option<InvalidToolCallAction> {
-        self.record_invalid_tool_call(ctx.turn(), &event.tool_name, event.args.as_deref())
+    ) -> impl std::future::Future<Output = Option<InvalidToolCallAction>> {
+        std::future::ready(self.record_invalid_tool_call(
+            ctx.turn(),
+            &event.tool_name,
+            event.args.as_deref(),
+        ))
     }
 }
 

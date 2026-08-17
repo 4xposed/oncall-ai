@@ -6,13 +6,13 @@ use super::{
 };
 
 use crate::config::InvestigationConfig;
+use crate::model::AnyCompletionModel;
 
 use rig_agent::agent::{
     Agent, AgentBuilder, AgentHook, HookContext, InvalidToolCallAction, InvalidToolCallContext,
     PromptResponse,
 };
 use rig_agent::completion::{Prompt as _, PromptError};
-use rig_core::client::CompletionClient;
 use rig_core::completion::CompletionModel;
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
@@ -22,35 +22,22 @@ use tokio_util::sync::CancellationToken;
 #[error(transparent)]
 pub struct BuildError(#[from] read_file::BuildError);
 
-/// Builds an investigation agent from any completion-capable Rig client.
+/// Builds an investigation agent from a provider-neutral completion model.
 ///
 /// # Errors
 ///
 /// Fails when `repo_root` cannot be resolved.
-pub fn build_agent<C>(
-    client: &C,
+pub fn build_agent(
+    model: AnyCompletionModel,
     config: &InvestigationConfig,
-) -> Result<(Agent<C::CompletionModel>, PathBuf), BuildError>
-where
-    C: CompletionClient,
-{
-    build_agent_from_model(client.completion_model(&config.model.model), config)
-}
-
-fn build_agent_from_model<M>(
-    model: M,
-    config: &InvestigationConfig,
-) -> Result<(Agent<M>, PathBuf), BuildError>
-where
-    M: CompletionModel,
-{
+) -> Result<(Agent<AnyCompletionModel>, PathBuf), BuildError> {
     let read_file = ReadFile::new(config)?;
     let repo_root = read_file.repo_root().to_path_buf();
     let mut builder = AgentBuilder::new(model)
         .preamble(INVESTIGATION_PREAMBLE)
         .tool(read_file)
         .output_schema::<Hypothesis>();
-    if let Some(temperature) = config.model.provider.temperature() {
+    if let Some(temperature) = config.temperature {
         builder = builder.temperature(temperature);
     }
     Ok((builder.build(), repo_root))
@@ -163,16 +150,16 @@ const INVALID_TOOL_CALL_RETRIES: usize = 2;
 struct RetryInvalidToolCalls;
 
 impl AgentHook for RetryInvalidToolCalls {
-    async fn on_invalid_tool_call(
+    fn on_invalid_tool_call(
         &self,
         _ctx: &HookContext,
         event: &InvalidToolCallContext,
-    ) -> Option<InvalidToolCallAction> {
-        Some(InvalidToolCallAction::retry(format!(
+    ) -> impl std::future::Future<Output = Option<InvalidToolCallAction>> {
+        std::future::ready(Some(InvalidToolCallAction::retry(format!(
             "there is no tool named `{}`; call one of: {}",
             event.tool_name,
             event.available_tools.join(", ")
-        )))
+        ))))
     }
 }
 
@@ -253,13 +240,13 @@ fn log_outcome(investigation: &Investigation, cause: Option<&str>) {
 mod tests {
     use super::*;
     use crate::alert::test_alert;
-    use crate::config::{InvestigationConfig, ModelProvider, ModelSpec};
+    use crate::config::{InvestigationConfig, ModelSpec};
     use crate::incident::IncidentId;
     use crate::investigation::{
         Confidence, Evidence, Hypothesis, Outcome, Step, ToolFailure, ToolOutcome,
     };
     use crate::triage::{Severity, TriageResult};
-    use rig_core::client::{Nothing, ProviderClient as _};
+    use rig_core::client::{CompletionClient as _, Nothing, ProviderClient as _};
     use rig_core::completion::{
         AssistantContent, CompletionError, CompletionModel, CompletionRequest, CompletionResponse,
         Usage,
@@ -298,11 +285,10 @@ mod tests {
 
         fn config(&self, max_turns: usize, timeout_secs: u64) -> InvestigationConfig {
             InvestigationConfig {
-                model: ModelSpec {
-                    provider: ModelProvider::Ollama,
-                    model: "test-model".to_owned(),
-                },
-                endpoint: "http://127.0.0.1:11434".to_owned(),
+                model: "ollama:test-model"
+                    .parse::<ModelSpec>()
+                    .expect("valid spec"),
+                temperature: None,
                 repo_root: self.root.path().to_path_buf(),
                 max_turns: NonZeroUsize::new(max_turns).expect("nonzero"),
                 timeout_secs: NonZeroU64::new(timeout_secs).expect("nonzero"),
@@ -313,16 +299,17 @@ mod tests {
     }
 
     #[test]
-    fn agent_builder_borrows_rig_completion_clients() {
+    fn agent_builder_accepts_erased_models_from_distinct_providers() {
         let fixture = Fixture::new();
         let ollama_config = fixture.config(8, 5);
         let ollama = ollama::Client::builder()
             .api_key(Nothing)
-            .base_url(&ollama_config.endpoint)
+            .base_url("http://127.0.0.1:11434")
             .build()
             .expect("ollama client builds");
-        let (_agent, ollama_root) =
-            build_agent(&ollama, &ollama_config).expect("ollama agent builds");
+        let ollama_model = AnyCompletionModel::new(ollama.completion_model("test-model"));
+        let (_agent, ollama_root) = build_agent(ollama_model, &ollama_config)
+            .expect("ollama-shaped erased model builds an agent");
         let _still_available = ollama.completion_model("another-model");
 
         let anthropic_config = InvestigationConfig {
@@ -333,8 +320,10 @@ mod tests {
         };
         let anthropic =
             anthropic::Client::from_val("test-key".to_owned()).expect("anthropic client builds");
-        let (_agent, anthropic_root) =
-            build_agent(&anthropic, &anthropic_config).expect("anthropic agent builds");
+        let anthropic_model =
+            AnyCompletionModel::new(anthropic.completion_model("claude-sonnet-5"));
+        let (_agent, anthropic_root) = build_agent(anthropic_model, &anthropic_config)
+            .expect("anthropic-shaped erased model builds an agent");
         let _still_available = anthropic.completion_model("another-model");
 
         assert_eq!(ollama_root, anthropic_root);
@@ -428,7 +417,8 @@ mod tests {
         let (done_tx, mut done_rx) = mpsc::channel(4);
         requests_tx.send(request()).await.expect("queue open");
         drop(requests_tx);
-        let (agent, _repo_root) = build_agent_from_model(model, &config).expect("agent builds");
+        let (agent, _repo_root) =
+            build_agent(AnyCompletionModel::new(model), &config).expect("agent builds");
         let dropped = worker(
             agent,
             config,
@@ -444,14 +434,37 @@ mod tests {
             .expect("every request yields a result, outcome regardless")
     }
 
+    async fn observed_temperature(temperature: Option<f64>) -> Option<f64> {
+        let fixture = Fixture::new();
+        let model = MockCompletionModel::new([turn([concludes(&hypothesis(&[]))])]);
+        let observer = model.clone();
+        let mut config = fixture.config(8, 5);
+        config.temperature = temperature;
+
+        let _investigated = investigate_with(model, config).await;
+
+        observer
+            .requests()
+            .first()
+            .and_then(|request| request.temperature)
+    }
+
+    #[tokio::test]
+    async fn stage_temperature_is_optional_and_provider_neutral() {
+        assert_eq!(observed_temperature(Some(0.35)).await, Some(0.35));
+        assert_eq!(observed_temperature(None).await, None);
+    }
+
     /// The operator is shown the root the tool resolved; a second
     /// canonicalization elsewhere could drift from it.
     #[test]
     fn build_agent_returns_the_root_the_tool_resolved() {
         let fixture = Fixture::new();
-        let (_agent, repo_root) =
-            build_agent_from_model(MockCompletionModel::default(), &fixture.config(8, 5))
-                .expect("agent builds");
+        let (_agent, repo_root) = build_agent(
+            AnyCompletionModel::new(MockCompletionModel::default()),
+            &fixture.config(8, 5),
+        )
+        .expect("agent builds");
         assert_eq!(
             repo_root,
             fixture
@@ -721,8 +734,11 @@ mod tests {
         for _ in 0..2 {
             requests_tx.send(request()).await.expect("queue open");
         }
-        let (agent, _repo_root) =
-            build_agent_from_model(MockCompletionModel::default(), &config).expect("agent builds");
+        let (agent, _repo_root) = build_agent(
+            AnyCompletionModel::new(MockCompletionModel::default()),
+            &config,
+        )
+        .expect("agent builds");
         let shutdown = CancellationToken::new();
         shutdown.cancel();
 

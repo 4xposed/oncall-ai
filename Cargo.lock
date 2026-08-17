@@ -1198,6 +1198,7 @@ dependencies = [
  "chrono",
  "clap",
  "config",
+ "futures",
  "http",
  "insta",
  "rig-agent",

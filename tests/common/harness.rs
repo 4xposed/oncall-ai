@@ -3,20 +3,33 @@ use std::net::{SocketAddr, TcpStream};
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
 
-pub struct Watchdog(std::sync::mpsc::Sender<()>);
+pub struct Watchdog {
+    disarm: std::sync::mpsc::Sender<()>,
+    _home: tempfile::TempDir,
+}
 
 impl Watchdog {
     pub fn disarm(self) {
-        if self.0.send(()).is_err() {
+        if self.disarm.send(()).is_err() {
             eprintln!("watchdog: already fired");
         }
     }
 }
 
-pub fn spawn_agent(envs: &[(&str, &str)]) -> (Child, BufReader<ChildStdout>, Watchdog) {
+pub fn spawn_agent_with_config(
+    config: &str,
+    envs: &[(&str, &str)],
+) -> (Child, BufReader<ChildStdout>, Watchdog) {
+    let home = tempfile::tempdir().expect("create process config home");
+    std::fs::write(
+        home.path().join("config.toml"),
+        format!("[webhook]\nbind = \"127.0.0.1:0\"\n{config}"),
+    )
+    .expect("write process config");
+
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_oncall-ai"));
     cmd.stdout(Stdio::piped()).stderr(Stdio::null());
-    cmd.env("ONCALL_WEBHOOK__BIND", "127.0.0.1:0");
+    cmd.env("ONCALL_HOME", home.path());
     cmd.env_remove("ANTHROPIC_API_KEY");
     for (key, value) in envs {
         cmd.env(key, value);
@@ -35,7 +48,14 @@ pub fn spawn_agent(envs: &[(&str, &str)]) -> (Child, BufReader<ChildStdout>, Wat
     });
 
     let stdout = BufReader::new(child.stdout.take().expect("stdout piped"));
-    (child, stdout, Watchdog(disarm_tx))
+    (
+        child,
+        stdout,
+        Watchdog {
+            disarm: disarm_tx,
+            _home: home,
+        },
+    )
 }
 
 pub fn read_until_contains(stdout: &mut BufReader<ChildStdout>, needle: &str) -> Vec<String> {
